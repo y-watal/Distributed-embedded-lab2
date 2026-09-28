@@ -1,250 +1,288 @@
-#include <zephyr/kernel.h>
+#include "app_state.h"
+
 #include <zephyr/device.h>
 #include <zephyr/drivers/uart.h>
+#include <zephyr/kernel.h>
 #include <zephyr/sys/atomic.h>
 #include <zephyr/sys/printk.h>
 
 #include <stdbool.h>
 #include <stdint.h>
-#include <inttypes.h>
-#include <stdio.h>
 #include <string.h>
 
-// Each received line can contain up to 191 characters plus a terminating zero
-#define RX_LINE_SIZE 192
+// Pi frame:
+// SOF | type | length | 19-byte payload | checksum
+//
+// Payload:
+// packet[4], steering[4], throttle[4], brake[4],
+// button4[1], button5[1], button10[1]
+//
+// All multibyte values arrive little-endian
+// Checksum is the 8-bit sum of type, length, and payload
 
-// Hold up to eight completed lines while the communication thread processes them
-#define RX_QUEUE_DEPTH 8
+#define UART_SOF          0xA5
+#define MSG_STATE         0x02
+#define STATE_LENGTH      19
+#define FRAME_LENGTH      (3 + STATE_LENGTH + 1)
 
-// Memory reserved for the communication thread's local variables and function calls
-#define COMM_STACK_SIZE 2048
+#define RX_QUEUE_DEPTH    256
+#define COMM_STACK_SIZE   2048
+#define COMM_PRIORITY     4
+#define PRINT_INTERVAL_MS 100
 
-// Nonnegative priorities are preemptive in Zephyr
-// Lower numbers have higher priority
-#define COMM_PRIORITY 4
-
-// Get the USART1 device configured in app.overlay
-// PB7 receives from the Pi and PB6 is available for transmitting back
+// The Pi sends commands into USART1 RX on PB7
 static const struct device *const pi_uart = DEVICE_DT_GET(DT_NODELABEL(usart1));
 
-// Thread-safe queue connecting the UART interrupt handler to the communication thread
-// Each queue entry is a COPY of one fixed-size line buffer
-// The final argument requests four-byte alignment for the queue storage
-K_MSGQ_DEFINE(rx_lines, RX_LINE_SIZE, RX_QUEUE_DEPTH, 4);
+// The ISR deposits bytes here without waiting
+// The communication thread removes and parses them
+K_MSGQ_DEFINE(rx_bytes, sizeof(uint8_t), RX_QUEUE_DEPTH, 1);
 
-// Only the UART interrupt handler modifies these variables
-// They retain the partially received line between interrupts
-static char rx_line[RX_LINE_SIZE];
-static size_t rx_length;
-static bool discard_line;
+static atomic_t dropped_bytes;
+static uint32_t valid_states;
+static uint32_t bad_headers;
+static uint32_t bad_checksums;
+static uint32_t bad_ranges;
 
-// Updated by the interrupt handler and read by the communication thread
-// Atomic access allows both execution contexts to use this counter safely
-static atomic_t dropped_lines;
+// Only the communication thread accesses this partial frame
+static uint8_t frame[FRAME_LENGTH];
+static size_t frame_position;
 
-// Values extracted from one of the Pi's wheel-state messages
-// These remain raw values from the Pi and are not actuator commands yet
-struct wheel_command {
-    uint32_t packet;
-    int steering;
-    int throttle;
-    int brake;
-    int button4;
-    int button5;
-};
+static uint32_t read_u32_le(const uint8_t *bytes)
+{
+    return (uint32_t)bytes[0]
+         | ((uint32_t)bytes[1] << 8)
+         | ((uint32_t)bytes[2] << 16)
+         | ((uint32_t)bytes[3] << 24);
+}
 
-/*
- * Collect received UART bytes and queue complete newline-terminated lines
- *
- * Runs in INTERRUPT CONTEXT when the UART driver invokes the registered callback
- * A single interrupt can contain part of a line, a full line, or several lines
- *
- * MUTATES rx_line, rx_length, discard_line, dropped_lines, and rx_lines
- * MUST NOT sleep, wait for queue space, parse messages, or print debug output here
- */
+static int32_t read_i32_le(const uint8_t *bytes)
+{
+    uint32_t bits = read_u32_le(bytes);
+    int32_t value;
+
+    // Copy the signed bit pattern without depending on a packed struct
+    memcpy(&value, &bits, sizeof(value));
+
+    return value;
+}
+
+static bool command_in_range(const struct wheel_command *command)
+{
+    if (command->steering < -32767 || command->steering > 32766) {
+        return false;
+    }
+
+    if (command->throttle < 0 || command->throttle > 32767) {
+        return false;
+    }
+
+    if (command->brake < 0 || command->brake > 32767) {
+        return false;
+    }
+
+    if ((command->button4 != 0 && command->button4 != 128) ||
+        (command->button5 != 0 && command->button5 != 128) ||
+        (command->button10 != 0 && command->button10 != 128)) {
+        return false;
+    }
+
+    return true;
+}
+
+static uint8_t frame_checksum(const uint8_t *bytes)
+{
+    uint8_t sum = 0;
+
+    // Exclude SOF and the final checksum byte
+    for (size_t i = 1; i < FRAME_LENGTH - 1; i++) {
+        sum = (uint8_t)(sum + bytes[i]);
+    }
+
+    return sum;
+}
+
+static void decode_state(struct wheel_command *command)
+{
+    const uint8_t *payload = &frame[3];
+
+    command->packet = read_u32_le(&payload[0]);
+    command->steering = read_i32_le(&payload[4]);
+    command->throttle = read_i32_le(&payload[8]);
+    command->brake = read_i32_le(&payload[12]);
+    command->button4 = payload[16];
+    command->button5 = payload[17];
+    command->button10 = payload[18];
+    command->received_at_ms = 0;
+}
+
+// Feed one received byte into the frame parser
+// This runs in the communication thread, not in the UART interrupt
+static void parse_byte(uint8_t byte)
+{
+    if (frame_position == 0) {
+        if (byte == UART_SOF) {
+            frame[frame_position++] = byte;
+        } else {
+            bad_headers++;
+        }
+        return;
+    }
+
+    if (frame_position == 1) {
+        if (byte != MSG_STATE) {
+            bad_headers++;
+            frame_position = 0;
+
+            // This byte might itself be the start of a new frame
+            if (byte == UART_SOF) {
+                frame[frame_position++] = byte;
+            }
+            return;
+        }
+
+        frame[frame_position++] = byte;
+        return;
+    }
+
+    if (frame_position == 2) {
+        if (byte != STATE_LENGTH) {
+            bad_headers++;
+            frame_position = 0;
+
+            if (byte == UART_SOF) {
+                frame[frame_position++] = byte;
+            }
+            return;
+        }
+
+        frame[frame_position++] = byte;
+        return;
+    }
+
+    frame[frame_position++] = byte;
+
+    if (frame_position < FRAME_LENGTH) {
+        return;
+    }
+
+    // A complete frame has arrived
+    frame_position = 0;
+
+    if (frame_checksum(frame) != frame[FRAME_LENGTH - 1]) {
+        bad_checksums++;
+        return;
+    }
+
+    struct wheel_command command;
+    decode_state(&command);
+
+    if (!command_in_range(&command)) {
+        bad_ranges++;
+        return;
+    }
+
+    // The only path that updates the shared command or its timestamp
+    app_state_set_command(&command);
+    valid_states++;
+}
+
+// UART interrupt handler
+// It only drains hardware bytes into the queue
+// It does not parse, print, lock a mutex, or wait
 static void uart_rx_callback(const struct device *dev, void *user_data)
 {
     uint8_t byte;
 
-    // The driver provides this argument but we do not need additional callback data
     (void)user_data;
 
-    // Refresh the interrupt status before checking whether bytes are available
     uart_irq_update(dev);
 
-    // Return if this interrupt has no received data to process
     if (!uart_irq_rx_ready(dev)) {
         return;
     }
 
-    // Drain all currently available bytes from the UART receive buffer
-    // Reading one byte at a time makes line assembly straightforward
     while (uart_fifo_read(dev, &byte, 1) == 1) {
-
-        // A newline marks the end of the Pi's current message
-        if (byte == '\n') {
-            if (discard_line) {
-                // Count the invalid or oversized line that we discarded
-                atomic_inc(&dropped_lines);
-            } else if (rx_length > 0) {
-                // Terminate the line so the thread can treat it as a C string
-                rx_line[rx_length] = '\0';
-
-                // Copy the completed line into the queue without waiting
-                // If the queue is full, drop this line and record the loss
-                if (k_msgq_put(&rx_lines, rx_line, K_NO_WAIT) != 0) {
-                    atomic_inc(&dropped_lines);
-                }
-            }
-
-            // Prepare to collect the next line
-            // Reusing rx_line is safe because the queue copied its contents
-            rx_length = 0;
-            discard_line = false;
-            continue;
+        if (k_msgq_put(&rx_bytes, &byte, K_NO_WAIT) != 0) {
+            atomic_inc(&dropped_bytes);
         }
-
-        // Accept both LF and CRLF line endings by ignoring carriage returns
-        // Once a line is rejected, ignore its remaining bytes until the newline
-        if (byte == '\r' || discard_line) {
-            continue;
-        }
-
-        // Reject embedded string terminators and lines that exceed the buffer
-        // Reserve the final buffer position for the terminating zero
-        if (byte == '\0' || rx_length >= sizeof(rx_line) - 1) {
-            discard_line = true;
-            continue;
-        }
-
-        // Append this byte and preserve it for the next iteration or interrupt
-        rx_line[rx_length++] = (char)byte;
     }
 }
 
-/*
- * Extract wheel values from one completed line
- *
- * Runs in THREAD CONTEXT
- * MUTATES the command structure supplied by the caller
- * Returns true only when all six fields match and no trailing characters remain
- *
- * This checks the text format only
- * Calibrated value ranges and message integrity checks are not implemented yet
- */
-static bool parse_command(const char *line, struct wheel_command *command)
+static void print_debug_state(void)
 {
-    // Remains zero unless sscanf reaches the final %n conversion
-    int consumed = 0;
+    struct wheel_command command;
 
-    // Match the exact labels and separators produced by the Pi
-    // SCNx32 reads the packet counter as a hexadecimal uint32_t
-    // Each %d reads a decimal integer into the corresponding structure field
-    // %n records the number of characters consumed and does not count as a field
-    int fields = sscanf(
-        line,
-        "Receive state (Pkt: %" SCNx32 ") : Wheel: %d | Throttle: %d"
-        " | Brake: %d | Button4: %d | Button5: %d%n",
-        &command->packet,
-        &command->steering,
-        &command->throttle,
-        &command->brake,
-        &command->button4,
-        &command->button5,
-        &consumed
-    );
+    if (!app_state_get_command(&command)) {
+        printk("waiting for valid Pi command | states=%u bad_hdr=%u "
+               "bad_sum=%u bad_range=%u dropped=%ld\n",
+               valid_states,
+               bad_headers,
+               bad_checksums,
+               bad_ranges,
+               (long)atomic_get(&dropped_bytes));
+        return;
+    }
 
-    // The caller must ignore command if parsing failed because it may be partially filled
-    return fields == 6 && consumed > 0 && line[consumed] == '\0';
+    int64_t age_ms = k_uptime_get() - command.received_at_ms;
+
+    printk("pkt=%u steer=%d throttle=%d brake=%d "
+           "b4=%u b5=%u b10=%u | age=%ldms | "
+           "states=%u bad_hdr=%u bad_sum=%u bad_range=%u dropped=%ld\n",
+           command.packet,
+           command.steering,
+           command.throttle,
+           command.brake,
+           command.button4,
+           command.button5,
+           command.button10,
+           (long)age_ms,
+           valid_states,
+           bad_headers,
+           bad_checksums,
+           bad_ranges,
+           (long)atomic_get(&dropped_bytes));
 }
 
-/*
- * Initialize UART reception and process completed messages forever
- *
- * Runs as a NORMAL ZEPHYR THREAD with its own stack and priority
- * Sleeps while the queue is empty so other tasks can run
- * Parses and prints in thread context to keep the UART interrupt handler short
- *
- * The decoded command is currently local to this thread
- * Publishing commands to motor and steering tasks will be added later
- */
 static void communication_thread(void *arg1, void *arg2, void *arg3)
 {
-    char line[RX_LINE_SIZE];
-    struct wheel_command command;
-    uint32_t received = 0;
+    uint8_t byte;
+    int64_t last_print_ms = 0;
 
-    // Zephyr thread entry functions accept three arguments
-    // This thread does not need any of them
     (void)arg1;
     (void)arg2;
     (void)arg3;
 
-    // Check that Zephyr successfully initialized the USART1 driver
     if (!device_is_ready(pi_uart)) {
         printk("ERROR: USART1 is not ready\n");
         return;
     }
 
-    // Register the function the UART driver will call during receive interrupts
-    // NULL means we are not passing extra user data to the callback
-    int ret = uart_irq_callback_user_data_set(pi_uart, uart_rx_callback, NULL);
+    int ret = uart_irq_callback_user_data_set(
+        pi_uart, uart_rx_callback, NULL
+    );
+
     if (ret < 0) {
         printk("ERROR: UART callback setup failed: %d\n", ret);
         return;
     }
 
-    // Allow incoming UART data to trigger receive interrupts
     uart_irq_rx_enable(pi_uart);
-
-    printk("USART1 ready: PB7 RX, PB6 TX, 921600 baud\n");
+    printk("USART1 ready: PB7 RX, PB6 TX, 115200 baud\n");
 
     while (1) {
-        // Wait for the next completed line and copy it into this thread's buffer
-        // K_FOREVER blocks this thread until data arrives without busy-waiting
-        k_msgq_get(&rx_lines, line, K_FOREVER);
-
-        // The Pi also sends force-feedback debug lines over this UART
-        // Those lines do not contain wheel commands
-        if (strncmp(line, "Send force ", 11) == 0) {
-            continue;
+        // Wake for received bytes or periodically to keep debug output visible
+        if (k_msgq_get(&rx_bytes, &byte, K_MSEC(20)) == 0) {
+            parse_byte(byte);
         }
 
-        // Reject lines that do not match the expected wheel-state message
-        if (!parse_command(line, &command)) {
-            printk("Rejected UART line: %s\n", line);
-            continue;
+        int64_t now_ms = k_uptime_get();
+
+        if (now_ms - last_print_ms >= PRINT_INTERVAL_MS) {
+            last_print_ms = now_ms;
+            print_debug_state();
         }
-
-        // Count successfully parsed messages separately from the Pi's packet counter
-        received++;
-
-        // Print decoded values through USART2 and ST-LINK USB to the Mac
-        // These prints do not go back to the Pi on USART1
-        printk(
-            "RX %" PRIu32 " | pkt=%08" PRIx32
-            " | steer=%d | throttle=%d | brake=%d"
-            " | b4=%d | b5=%d | dropped=%ld\n",
-            received,
-            command.packet,
-            command.steering,
-            command.throttle,
-            command.brake,
-            command.button4,
-            command.button5,
-            (long)atomic_get(&dropped_lines)
-        );
     }
 }
 
-/*
- * Create the communication thread and make it ready at startup
- *
- * Arguments specify the thread identifier, stack size, entry function,
- * three unused arguments, priority, options, and startup delay
- *
- * The final zero means no startup delay
- * Zephyr schedules this thread automatically so main does not call it
- */
 K_THREAD_DEFINE(communication_tid, COMM_STACK_SIZE, communication_thread,
                 NULL, NULL, NULL, COMM_PRIORITY, 0, 0);

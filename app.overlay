@@ -1,6 +1,82 @@
+#include <zephyr/dt-bindings/pwm/pwm.h>
+
+/ {
+    steering_servo: zephyr,user {
+        pwms = <&pwm3 1 PWM_MSEC(20) PWM_POLARITY_NORMAL>;
+    };
+};
+
+/* Left encoder */
+&timers1 {
+    status = "okay";
+    st,prescaler = <0>;
+
+    pwm {
+        status = "disabled";
+    };
+
+    left_encoder: qdec {
+        compatible = "st,stm32-qdec";
+        status = "okay";
+
+        pinctrl-0 = <&tim1_ch1_pa8 &tim1_ch2_pa9>;
+        pinctrl-names = "default";
+
+        st,encoder-mode = <3>;
+        st,input-filter-level = <3>;
+
+        /* Placeholder because this test reads raw counts, not angles */
+        st,counts-per-revolution = <1>;
+    };
+};
+
+/* Right encoder */
+&timers2 {
+    status = "okay";
+    st,prescaler = <0>;
+
+    pwm {
+        status = "disabled";
+    };
+
+    right_encoder: qdec {
+        compatible = "st,stm32-qdec";
+        status = "okay";
+
+        pinctrl-0 = <&tim2_ch1_pa15 &tim2_ch2_pb3>;
+        pinctrl-names = "default";
+
+        st,encoder-mode = <3>;
+        st,input-filter-level = <3>;
+
+        /* Placeholder because this test reads raw counts, not angles */
+        st,counts-per-revolution = <1>;
+    };
+};
+
+/* Steering servo */
+&timers3 {
+    status = "okay";
+    st,prescaler = <83>;
+
+    pwm3: pwm {
+        status = "okay";
+        pinctrl-0 = <&tim3_ch1_pb4>;
+        pinctrl-names = "default";
+    };
+};
+
+/* Pi connection */
 &usart1 {
     pinctrl-0 = <&usart1_tx_pb6 &usart1_rx_pb7>;
     pinctrl-names = "default";
     current-speed = <921600>;
+    status = "okay";
+};
+
+/* Current sensors */
+&adc1 {
+    pinctrl-0 = <&adc1_in4_pa4 &adc1_in8_pb0 &adc1_in11_pc1>;
+    pinctrl-names = "default";
     status = "okay";
 };

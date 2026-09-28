@@ -8,4 +8,9 @@ target_include_directories(app PRIVATE include)
 target_sources(app PRIVATE
     src/main.c
     src/tasks/communication.c
+    src/drivers/motor.c
+    src/drivers/current_sensor.c
+    src/drivers/servo.c
+    src/drivers/encoder.c
+    src/drivers/led.c
 )

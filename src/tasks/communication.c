@@ -224,7 +224,7 @@ static void print_debug_state(void)
     }
 
     int64_t age_ms = k_uptime_get() - command.received_at_ms;
-
+/*
     printk("pkt=%u steer=%d throttle=%d brake=%d "
            "b4=%u b5=%u b10=%u | age=%ldms | "
            "states=%u bad_hdr=%u bad_sum=%u bad_range=%u dropped=%ld\n",
@@ -241,6 +241,7 @@ static void print_debug_state(void)
            bad_checksums,
            bad_ranges,
            (long)atomic_get(&dropped_bytes));
+           */
 }
 
 static void communication_thread(void *arg1, void *arg2, void *arg3)

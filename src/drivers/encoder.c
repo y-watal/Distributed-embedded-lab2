@@ -10,10 +10,10 @@
 #include <stm32_ll_tim.h>
 
 #define COUNTS_PER_WHEEL_REV 1316
-#define WHEEL_CIRCUMFERENCE_UM 235619  /* pi * 75 mm */
+#define WHEEL_CIRCUMFERENCE_UM 235619
 
 #define LEFT_SIGN  1
-#define RIGHT_SIGN 1
+#define RIGHT_SIGN -1
 
 static const struct device *const left_device =
     DEVICE_DT_GET(DT_NODELABEL(left_encoder));
@@ -41,7 +41,7 @@ static int64_t update_count(struct encoder_state *encoder)
     int64_t modulus = (int64_t)LL_TIM_GetAutoReload(encoder->timer) + 1;
     int64_t delta = (int64_t)current - encoder->previous;
 
-    /* Account for the timer rolling over between reads */
+    // Account for timer rollover between reads
     if (delta > modulus / 2) {
         delta -= modulus;
     } else if (delta < -(modulus / 2)) {
@@ -60,10 +60,7 @@ static int32_t velocity_mm_s(int64_t count_delta, int64_t elapsed_ms)
         return 0;
     }
 
-    /*
-     * circumference is in micrometers
-     * milliseconds-to-seconds and micrometers-to-millimeters cancel
-     */
+    // The unit conversions cancel to produce mm/s
     return (int32_t)(
         count_delta * WHEEL_CIRCUMFERENCE_UM /
         (COUNTS_PER_WHEEL_REV * elapsed_ms)
@@ -108,6 +105,5 @@ int encoder_read(struct encoder_readings *readings)
     readings->right_velocity_mm_s = velocity_mm_s(right_delta, elapsed_ms);
 
     previous_time_ms = now_ms;
-
     return 0;
 }

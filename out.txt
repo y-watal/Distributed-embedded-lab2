@@ -1,0 +1,225 @@
+#include <zephyr/dt-bindings/pwm/pwm.h>
+
+/ {
+    steering_servo: zephyr,user {
+        pwms = <&pwm3 1 PWM_MSEC(20) PWM_POLARITY_NORMAL>;
+    };
+};
+
+/* Left encoder */
+&timers1 {
+    status = "okay";
+    st,prescaler = <0>;
+
+    pwm {
+        status = "disabled";
+    };
+
+    left_encoder: qdec {
+        compatible = "st,stm32-qdec";
+        status = "okay";
+
+        pinctrl-0 = <&tim1_ch1_pa8 &tim1_ch2_pa9>;
+        pinctrl-names = "default";
+
+        st,encoder-mode = <3>;
+        st,input-filter-level = <3>;
+
+        /* Placeholder because this test reads raw counts, not angles */
+        st,counts-per-revolution = <1>;
+    };
+};
+
+/* Right encoder */
+&timers2 {
+    status = "okay";
+    st,prescaler = <0>;
+
+    pwm {
+        status = "disabled";
+    };
+
+    right_encoder: qdec {
+        compatible = "st,stm32-qdec";
+        status = "okay";
+
+        pinctrl-0 = <&tim2_ch1_pa15 &tim2_ch2_pb3>;
+        pinctrl-names = "default";
+
+        st,encoder-mode = <3>;
+        st,input-filter-level = <3>;
+
+        /* Placeholder because this test reads raw counts, not angles */
+        st,counts-per-revolution = <1>;
+    };
+};
+
+/* Steering servo */
+&timers3 {
+    status = "okay";
+    st,prescaler = <83>;
+
+    pwm3: pwm {
+        status = "okay";
+        pinctrl-0 = <&tim3_ch1_pb4>;
+        pinctrl-names = "default";
+    };
+};
+
+/* Pi connection */
+&usart1 {
+    pinctrl-0 = <&usart1_tx_pb6 &usart1_rx_pb7>;
+    pinctrl-names = "default";
+    current-speed = <115200>;
+    status = "okay";
+};
+
+/* Current sensors */
+&adc1 {
+    pinctrl-0 = <&adc1_in4_pa4 &adc1_in8_pb0 &adc1_in11_pc1>;
+    pinctrl-names = "default";
+    status = "okay";
+};CONFIG_GPIO=y
+CONFIG_SERIAL=y
+CONFIG_UART_INTERRUPT_DRIVEN=y
+CONFIG_ADC=y
+CONFIG_PWM=y
+CONFIG_SENSOR=y
+
+CONFIG_CONSOLE=y
+CONFIG_UART_CONSOLE=y
+CONFIG_PRINTK=y
+
+CONFIG_MAIN_STACK_SIZE=2048#ifndef SERVO_H
+#define SERVO_H
+
+int servo_init(void);
+int servo_set_angle(int angle_deg);
+
+#endif#include <errno.h>
+#include <stdint.h>
+
+#include <zephyr/device.h>
+#include <zephyr/drivers/pwm.h>
+
+#include "servo.h"
+
+#define SERVO_MIN_ANGLE_DEG 0
+#define SERVO_MAX_ANGLE_DEG 180
+#define SERVO_CENTER_DEG    90
+
+#define SERVO_MIN_PULSE_US  500
+#define SERVO_MAX_PULSE_US  2500
+
+static const struct pwm_dt_spec servo_pwm =
+    PWM_DT_SPEC_GET(DT_NODELABEL(steering_servo));
+
+int servo_set_angle(int angle_deg)
+{
+    if (!device_is_ready(servo_pwm.dev)) {
+        return -ENODEV;
+    }
+
+    if (angle_deg < SERVO_MIN_ANGLE_DEG ||
+        angle_deg > SERVO_MAX_ANGLE_DEG) {
+        return -EINVAL;
+    }
+
+    uint32_t pulse_us = SERVO_MIN_PULSE_US +
+        (uint32_t)angle_deg *
+        (SERVO_MAX_PULSE_US - SERVO_MIN_PULSE_US) /
+        SERVO_MAX_ANGLE_DEG;
+
+    return pwm_set_pulse_dt(&servo_pwm, PWM_USEC(pulse_us));
+}
+
+int servo_init(void)
+{
+    return servo_set_angle(SERVO_CENTER_DEG);
+}/* steering task implementation will go here */
+/* motor_control task implementation will go here */
+#include "safety.h"
+
+#include "app_state.h"
+#include "led.h"
+#include "motor.h"
+
+#include <zephyr/kernel.h>
+#include <zephyr/sys/atomic.h>
+#include <zephyr/sys/printk.h>
+
+#include <stdbool.h>
+#include <stdint.h>
+
+// Poll every 5 ms
+// Treat commands as stale at 90 ms so a poll can act before 100 ms
+#define SAFETY_CHECK_MS   5
+#define COMMAND_STALE_MS 90
+#define SAFETY_STACK_SIZE 1024
+#define SAFETY_PRIORITY   2
+
+static atomic_t car_state = ATOMIC_INIT(CAR_STATE_ERROR);
+
+K_THREAD_STACK_DEFINE(safety_stack, SAFETY_STACK_SIZE);
+static struct k_thread safety_thread_data;
+
+enum car_state safety_get_state(void)
+{
+    return (enum car_state)atomic_get(&car_state);
+}
+
+static bool command_is_fresh(void)
+{
+    struct wheel_command command;
+
+    if (!app_state_get_command(&command)) {
+        return false;
+    }
+
+    int64_t age_ms = k_uptime_get() - command.received_at_ms;
+
+    return age_ms >= 0 && age_ms < COMMAND_STALE_MS;
+}
+
+static void safety_thread(void *arg1, void *arg2, void *arg3)
+{
+    (void)arg1;
+    (void)arg2;
+    (void)arg3;
+
+    while (1) {
+        bool fresh = command_is_fresh();
+        enum car_state current = safety_get_state();
+
+        if (fresh && current == CAR_STATE_ERROR) {
+            // Leave the motors coasting in normal mode
+            // No throttle control is implemented in this stage
+            int ret = motor_set_drive_allowed(true);
+
+            if (ret < 0) {
+                printk("ERROR: could not release motor brake: %d\n", ret);
+            } else {
+                led_all_off();
+                atomic_set(&car_state, CAR_STATE_NORMAL);
+                printk("state=NORMAL link=OK\n");
+            }
+        } else if (!fresh && current == CAR_STATE_NORMAL) {
+            // Brake first, then start hazards
+            int ret = motor_set_drive_allowed(false);
+            led_hazards_start();
+
+            atomic_set(&car_state, CAR_STATE_ERROR);
+            printk("state=ERROR link=TIMEOUT brake_result=%d\n", ret);
+        }
+
+        k_sleep(K_MSEC(SAFETY_CHECK_MS));
+    }
+}
+
+void safety_start(void)
+{
+    k_thread_create(&safety_thread_data, safety_stack,
+                    K_THREAD_STACK_SIZEOF(safety_stack),
+                    safety_thread, NULL, NULL, NULL,
+                    SAFETY_PRIORITY, 0, K_NO_WAIT);
+}

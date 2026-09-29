@@ -2,7 +2,9 @@
 
 / {
     steering_servo: zephyr,user {
-        pwms = <&pwm3 1 PWM_MSEC(20) PWM_POLARITY_NORMAL>;
+        pwms = <&pwm3 1 PWM_MSEC(20) PWM_POLARITY_NORMAL>,
+               <&pwm5 1 PWM_USEC(100) PWM_POLARITY_NORMAL>,
+               <&pwm5 2 PWM_USEC(100) PWM_POLARITY_NORMAL>;
     };
 };
 
@@ -24,8 +26,6 @@
 
         st,encoder-mode = <3>;
         st,input-filter-level = <3>;
-
-        /* Placeholder because this test reads raw counts, not angles */
         st,counts-per-revolution = <1>;
     };
 };
@@ -48,13 +48,11 @@
 
         st,encoder-mode = <3>;
         st,input-filter-level = <3>;
-
-        /* Placeholder because this test reads raw counts, not angles */
         st,counts-per-revolution = <1>;
     };
 };
 
-/* Steering servo */
+/* Steering servo on PB4 */
 &timers3 {
     status = "okay";
     st,prescaler = <83>;
@@ -62,6 +60,18 @@
     pwm3: pwm {
         status = "okay";
         pinctrl-0 = <&tim3_ch1_pb4>;
+        pinctrl-names = "default";
+    };
+};
+
+/* Motor enables: ENA on PA0, ENB on PA1 */
+&timers5 {
+    status = "okay";
+    st,prescaler = <83>;
+
+    pwm5: pwm {
+        status = "okay";
+        pinctrl-0 = <&tim5_ch1_pa0 &tim5_ch2_pa1>;
         pinctrl-names = "default";
     };
 };

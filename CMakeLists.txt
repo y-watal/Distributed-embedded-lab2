@@ -9,6 +9,10 @@ target_sources(app PRIVATE
     src/main.c
     src/app_state.c
     src/tasks/communication.c
+    src/tasks/safety.c
+    src/tasks/motor_control.c
+    src/tasks/steering.c
+    src/tasks/blinkers.c
     src/drivers/motor.c
     src/drivers/current_sensor.c
     src/drivers/servo.c

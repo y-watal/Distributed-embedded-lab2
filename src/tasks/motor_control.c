@@ -39,6 +39,7 @@
 #define MOTOR_CONTROL_PRIORITY 1
 #define DEBUG_STACK_SIZE 1024
 #define DEBUG_PRIORITY 6
+#define DEBUG_OUTPUT_ENABLED 0
 
 enum debug_mode {
     DEBUG_ERROR,
@@ -69,6 +70,18 @@ static atomic_t debug_right_speed = ATOMIC_INIT(0);
 static atomic_t debug_left_duty = ATOMIC_INIT(0);
 static atomic_t debug_right_duty = ATOMIC_INIT(0);
 static atomic_t debug_command_age = ATOMIC_INIT(0);
+
+void motor_control_get_telemetry(struct motor_telemetry *telemetry)
+{
+    if (telemetry == NULL) {
+        return;
+    }
+
+    telemetry->left_speed_mm_s = atomic_get(&debug_left_speed);
+    telemetry->right_speed_mm_s = atomic_get(&debug_right_speed);
+    telemetry->left_duty_permille = (uint16_t)atomic_get(&debug_left_duty);
+    telemetry->right_duty_permille = (uint16_t)atomic_get(&debug_right_duty);
+}
 
 static float clamp_float(float value, float minimum, float maximum)
 {
@@ -149,6 +162,8 @@ static void clear_debug_output(enum debug_mode mode)
     atomic_set(&debug_target, 0);
     atomic_set(&debug_left_duty, 0);
     atomic_set(&debug_right_duty, 0);
+    atomic_set(&debug_left_speed, 0);
+    atomic_set(&debug_right_speed, 0);
 }
 
 static void motor_control_thread(void *arg1, void *arg2, void *arg3)
@@ -314,8 +329,10 @@ void motor_control_start(void)
                     motor_control_thread, NULL, NULL, NULL,
                     MOTOR_CONTROL_PRIORITY, 0, K_NO_WAIT);
 
-    k_thread_create(&debug_thread_data, debug_stack,
+    if (DEBUG_OUTPUT_ENABLED) {
+        k_thread_create(&debug_thread_data, debug_stack,
                     K_THREAD_STACK_SIZEOF(debug_stack),
                     debug_thread, NULL, NULL, NULL,
                     DEBUG_PRIORITY, 0, K_NO_WAIT);
+    }
 }

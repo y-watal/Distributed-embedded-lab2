@@ -17,6 +17,7 @@ struct wheel_command {
 
 void app_state_set_command(const struct wheel_command *command);
 bool app_state_get_command(struct wheel_command *command);
+void app_state_invalidate_command(void);
 void app_state_wait_for_command(void);
 bool app_state_wait_for_command_ms(int32_t timeout_ms);
 

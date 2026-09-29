@@ -24,6 +24,7 @@ enum self_test_request {
 };
 
 static atomic_t car_state = ATOMIC_INIT(CAR_STATE_ERROR);
+static atomic_t fault_reason_value = ATOMIC_INIT(FAULT_LINK_TIMEOUT);
 static atomic_t self_test_request = ATOMIC_INIT(SELF_TEST_REQUEST_NONE);
 
 K_THREAD_STACK_DEFINE(safety_stack, SAFETY_STACK_SIZE);
@@ -32,6 +33,22 @@ static struct k_thread safety_thread_data;
 enum car_state safety_get_state(void)
 {
     return (enum car_state)atomic_get(&car_state);
+}
+
+enum fault_reason safety_get_fault(void)
+{
+    return (enum fault_reason)atomic_get(&fault_reason_value);
+}
+
+void safety_bad_range(void)
+{
+    /* Reject the previous command too: recovery requires a new valid frame. */
+    app_state_invalidate_command();
+    atomic_set(&car_state, CAR_STATE_ERROR);
+    atomic_set(&fault_reason_value, FAULT_BAD_RANGE);
+    int ret = motor_set_drive_allowed(false);
+    led_hazards_start();
+    printk("state=ERROR fault=BAD_RANGE brake_result=%d\n", ret);
 }
 
 void safety_request_self_test_enter(void)
@@ -96,6 +113,7 @@ static void safety_thread(void *arg1, void *arg2, void *arg3)
             if (current != CAR_STATE_ERROR) {
                 // Revoke drive permission before changing the lights
                 atomic_set(&car_state, CAR_STATE_ERROR);
+                atomic_set(&fault_reason_value, FAULT_LINK_TIMEOUT);
                 int ret = motor_set_drive_allowed(false);
                 led_hazards_start();
                 applied_indicator = -1;
@@ -114,6 +132,7 @@ static void safety_thread(void *arg1, void *arg2, void *arg3)
                 printk("ERROR: could not release motor brake: %d\n", ret);
             } else {
                 atomic_set(&car_state, CAR_STATE_NORMAL);
+                atomic_set(&fault_reason_value, FAULT_NONE);
                 current = CAR_STATE_NORMAL;
                 applied_indicator = -1;
                 printk("state=NORMAL link=OK\n");
@@ -124,6 +143,7 @@ static void safety_thread(void *arg1, void *arg2, void *arg3)
             request == SELF_TEST_REQUEST_ENTER) {
             // Block new motor commands before selecting the brake
             atomic_set(&car_state, CAR_STATE_SELF_TEST);
+            atomic_set(&fault_reason_value, FAULT_SELF_TEST);
             int ret = motor_set_drive_allowed(false);
             led_hazards_start();
             applied_indicator = -1;
@@ -141,6 +161,7 @@ static void safety_thread(void *arg1, void *arg2, void *arg3)
                     printk("ERROR: could not exit self-test: %d\n", ret);
                 } else {
                     atomic_set(&car_state, CAR_STATE_NORMAL);
+                    atomic_set(&fault_reason_value, FAULT_NONE);
                     current = CAR_STATE_NORMAL;
                     applied_indicator = -1;
                     printk("state=NORMAL self_test=EXIT\n");

@@ -27,11 +27,11 @@ enum {
     SERVO_SENSOR
 };
 
-/* PA4, PB0 and PC1 */
-static const uint8_t channels[SENSOR_COUNT] = {4, 8, 11};
+/* Left motor: PB0; right motor: PA4; servo: PC1. */
+static const uint8_t channels[SENSOR_COUNT] = {8, 4, 11};
 
 /* Positive current for the wiring directions used in our tests */
-static const int polarity[SENSOR_COUNT] = {1, -1, 1};
+static const int polarity[SENSOR_COUNT] = {-1, 1, 1};
 
 static const struct device *const adc_dev =
     DEVICE_DT_GET(DT_NODELABEL(adc1));

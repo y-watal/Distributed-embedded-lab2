@@ -1,4 +1,6 @@
 #include "app_state.h"
+#include "communication.h"
+#include "safety.h"
 
 #include <zephyr/device.h>
 #include <zephyr/drivers/uart.h>
@@ -29,6 +31,7 @@
 #define COMM_STACK_SIZE   2048
 #define COMM_PRIORITY     4
 #define PRINT_INTERVAL_MS 100
+#define DEBUG_OUTPUT_ENABLED 0
 
 // The Pi sends commands into USART1 RX on PB7
 static const struct device *const pi_uart = DEVICE_DT_GET(DT_NODELABEL(usart1));
@@ -38,10 +41,22 @@ static const struct device *const pi_uart = DEVICE_DT_GET(DT_NODELABEL(usart1));
 K_MSGQ_DEFINE(rx_bytes, sizeof(uint8_t), RX_QUEUE_DEPTH, 1);
 
 static atomic_t dropped_bytes;
-static uint32_t valid_states;
-static uint32_t bad_headers;
-static uint32_t bad_checksums;
-static uint32_t bad_ranges;
+static atomic_t valid_states;
+static atomic_t bad_headers;
+static atomic_t bad_checksums;
+static atomic_t bad_ranges;
+
+void communication_get_counters(struct command_counters *counters)
+{
+    if (counters == NULL) {
+        return;
+    }
+    counters->valid = (uint32_t)atomic_get(&valid_states);
+    counters->bad_header = (uint32_t)atomic_get(&bad_headers);
+    counters->bad_checksum = (uint32_t)atomic_get(&bad_checksums);
+    counters->bad_range = (uint32_t)atomic_get(&bad_ranges);
+    counters->dropped_bytes = (uint32_t)atomic_get(&dropped_bytes);
+}
 
 // Only the communication thread accesses this partial frame
 static uint8_t frame[FRAME_LENGTH];
@@ -123,14 +138,14 @@ static void parse_byte(uint8_t byte)
         if (byte == UART_SOF) {
             frame[frame_position++] = byte;
         } else {
-            bad_headers++;
+            atomic_inc(&bad_headers);
         }
         return;
     }
 
     if (frame_position == 1) {
         if (byte != MSG_STATE) {
-            bad_headers++;
+            atomic_inc(&bad_headers);
             frame_position = 0;
 
             // This byte might itself be the start of a new frame
@@ -146,7 +161,7 @@ static void parse_byte(uint8_t byte)
 
     if (frame_position == 2) {
         if (byte != STATE_LENGTH) {
-            bad_headers++;
+            atomic_inc(&bad_headers);
             frame_position = 0;
 
             if (byte == UART_SOF) {
@@ -169,7 +184,7 @@ static void parse_byte(uint8_t byte)
     frame_position = 0;
 
     if (frame_checksum(frame) != frame[FRAME_LENGTH - 1]) {
-        bad_checksums++;
+        atomic_inc(&bad_checksums);
         return;
     }
 
@@ -177,13 +192,14 @@ static void parse_byte(uint8_t byte)
     decode_state(&command);
 
     if (!command_in_range(&command)) {
-        bad_ranges++;
+        atomic_inc(&bad_ranges);
+        safety_bad_range();
         return;
     }
 
     // The only path that updates the shared command or its timestamp
     app_state_set_command(&command);
-    valid_states++;
+    atomic_inc(&valid_states);
 }
 
 // UART interrupt handler
@@ -215,16 +231,16 @@ static void print_debug_state(void)
     if (!app_state_get_command(&command)) {
         printk("waiting for valid Pi command | states=%u bad_hdr=%u "
                "bad_sum=%u bad_range=%u dropped=%ld\n",
-               valid_states,
-               bad_headers,
-               bad_checksums,
-               bad_ranges,
+               (unsigned int)atomic_get(&valid_states),
+               (unsigned int)atomic_get(&bad_headers),
+               (unsigned int)atomic_get(&bad_checksums),
+               (unsigned int)atomic_get(&bad_ranges),
                (long)atomic_get(&dropped_bytes));
         return;
     }
 
-    int64_t age_ms = k_uptime_get() - command.received_at_ms;
 /*
+    int64_t age_ms = k_uptime_get() - command.received_at_ms;
     printk("pkt=%u steer=%d throttle=%d brake=%d "
            "b4=%u b5=%u b10=%u | age=%ldms | "
            "states=%u bad_hdr=%u bad_sum=%u bad_range=%u dropped=%ld\n",
@@ -236,10 +252,10 @@ static void print_debug_state(void)
            command.button5,
            command.button10,
            (long)age_ms,
-           valid_states,
-           bad_headers,
-           bad_checksums,
-           bad_ranges,
+           (unsigned int)atomic_get(&valid_states),
+           (unsigned int)atomic_get(&bad_headers),
+           (unsigned int)atomic_get(&bad_checksums),
+           (unsigned int)atomic_get(&bad_ranges),
            (long)atomic_get(&dropped_bytes));
            */
 }
@@ -278,7 +294,8 @@ static void communication_thread(void *arg1, void *arg2, void *arg3)
 
         int64_t now_ms = k_uptime_get();
 
-        if (now_ms - last_print_ms >= PRINT_INTERVAL_MS) {
+        if (DEBUG_OUTPUT_ENABLED &&
+            now_ms - last_print_ms >= PRINT_INTERVAL_MS) {
             last_print_ms = now_ms;
             print_debug_state();
         }

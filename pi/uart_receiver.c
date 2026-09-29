@@ -26,7 +26,7 @@
 
 #define UART_DEV  "/dev/ttyAMA3"    // UART3 (dtoverlay=uart3): TX=GPIO4, RX=GPIO5. Verify name with: ls /dev/ttyAMA*
 #define UART_BAUD B115200           // must match the receiving side
-#define ECHO_TO_STDOUT 1            // 1 = also print human-readable text to the local terminal
+#define ECHO_TO_STDOUT 0            // 1 = also print every incoming wheel command
 /** **/
 
 #define TX_INTERVAL_MS 10           // UART packet rate to the STM32 (state messages), ~100 Hz
@@ -56,6 +56,10 @@
  * which struct to memcpy the payload into -- no text parsing needed.
  * ------------------------------------------------------------------- */
 #define UART_SOF 0xA5
+#define MSG_STATUS 0x03
+#define STATUS_PAYLOAD_LEN 36
+#define STATUS_FRAME_LEN (3 + STATUS_PAYLOAD_LEN + 1)
+#define STATUS_PRINT_MS 250
 
 /* ---------------------------------------------------------------------
  * Activity indicators. Raw register access via /dev/gpiomem, so no extra
@@ -118,10 +122,121 @@ typedef struct __attribute__((packed)) {
 static int uart_fd = -1;
 static pthread_mutex_t uart_lock = PTHREAD_MUTEX_INITIALIZER;
 
+static uint16_t read_u16_le(const uint8_t *p) {
+  return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+}
+
+static int16_t read_i16_le(const uint8_t *p) {
+  uint16_t bits = read_u16_le(p);
+  int16_t value;
+  memcpy(&value, &bits, sizeof(value));
+  return value;
+}
+
+static uint32_t read_u32_le(const uint8_t *p) {
+  return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+         ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
 static uint64_t now_ms(void) {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
   return (uint64_t) ts.tv_sec * 1000 + (uint64_t) ts.tv_nsec / 1000000;
+}
+
+static void *status_receiver(void *arg) {
+  (void)arg;
+  uint8_t frame[STATUS_FRAME_LEN];
+  size_t position = 0;
+  uint64_t last_rx_ms = 0;
+  uint64_t last_print_ms = 0;
+  uint32_t received = 0;
+  uint32_t bad_checksum = 0;
+  uint32_t bad_header = 0;
+  uint32_t bad_values = 0;
+
+  while (1) {
+    uint8_t byte;
+    ssize_t n = read(uart_fd, &byte, 1);
+    if (n < 0) {
+      if (errno == EINTR) continue;
+      perror("uart status read");
+      break;
+    }
+    if (n == 0) {
+      usleep(1000);
+      continue;
+    }
+
+    if (position == 0) {
+      if (byte == UART_SOF) frame[position++] = byte;
+      continue;
+    }
+    if (position == 1 && byte != MSG_STATUS) {
+      bad_header++;
+      position = 0;
+      if (byte == UART_SOF) frame[position++] = byte;
+      continue;
+    }
+    if (position == 2 && byte != STATUS_PAYLOAD_LEN) {
+      bad_header++;
+      position = 0;
+      if (byte == UART_SOF) frame[position++] = byte;
+      continue;
+    }
+
+    frame[position++] = byte;
+    if (position != sizeof(frame)) continue;
+    position = 0;
+
+    uint8_t checksum = 0;
+    for (size_t i = 1; i < sizeof(frame) - 1; ++i) {
+      checksum = (uint8_t)(checksum + frame[i]);
+    }
+    if (checksum != frame[sizeof(frame) - 1]) {
+      bad_checksum++;
+      continue;
+    }
+
+    const uint8_t *p = frame + 3;
+    uint16_t seq = read_u16_le(p);
+    uint8_t state = p[2], fault = p[3], indicator = p[4], flags = p[5];
+    uint16_t duty_left = read_u16_le(p + 16);
+    uint16_t duty_right = read_u16_le(p + 18);
+    if (state > 2 || fault > 3 || indicator > 3 || (flags & ~3U) ||
+        duty_left > 1000 || duty_right > 1000) {
+      bad_values++;
+      continue;
+    }
+
+    static const char *states[] = {"ERROR", "NORMAL", "SELF_TEST"};
+    static const char *faults[] = {"NONE", "LINK_TIMEOUT", "BAD_RANGE", "SELF_TEST"};
+    static const char *indicators[] = {"OFF", "LEFT", "RIGHT", "HAZARDS"};
+    uint64_t now = now_ms();
+    uint64_t interval = last_rx_ms ? now - last_rx_ms : 0;
+    last_rx_ms = now;
+    received++;
+
+    if (now - last_print_ms >= STATUS_PRINT_MS || received == 1) {
+      last_print_ms = now;
+      printf("STM status seq=%u state=%s fault=%s indicator=%s "
+             "I=[%d,%d,%d]mA speed=[%d,%d]mm/s duty=[%u,%u]/1000 "
+             "cmd=%u valid=%u bad=[hdr:%u sum:%u range:%u drop:%u] "
+             "rx=%u interval=%llums pi_bad=[hdr:%u sum:%u value:%u] "
+             "flags=0x%02x\n",
+             seq, states[state], faults[fault], indicators[indicator],
+             read_i16_le(p + 6), read_i16_le(p + 8), read_i16_le(p + 10),
+             read_i16_le(p + 12), read_i16_le(p + 14),
+             duty_left, duty_right,
+             read_u32_le(p + 20), read_u32_le(p + 24),
+             read_u16_le(p + 28), read_u16_le(p + 30),
+             read_u16_le(p + 32), read_u16_le(p + 34),
+             received, (unsigned long long)interval,
+             bad_header, bad_checksum, bad_values, flags);
+      fflush(stdout);
+    }
+  }
+  return NULL;
 }
 
 static int uart_open(const char *dev, speed_t baud) {
@@ -239,6 +354,13 @@ int main() {
   }
   gpio_config_output(GPIO_PIN_UART_TX);
   gpio_config_output(GPIO_PIN_UDP_RX);
+
+  pthread_t status_tid;
+  if (pthread_create(&status_tid, NULL, status_receiver, NULL) != 0) {
+    perror("status receiver thread");
+    exit(EXIT_FAILURE);
+  }
+  pthread_detach(status_tid);
 
   if ((sockfd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
     perror("failed to create socket");

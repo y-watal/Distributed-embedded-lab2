@@ -13,6 +13,8 @@ target_sources(app PRIVATE
     src/tasks/motor_control.c
     src/tasks/steering.c
     src/tasks/blinkers.c
+    src/tasks/current_sensing.c
+    src/tasks/status.c
     src/drivers/motor.c
     src/drivers/current_sensor.c
     src/drivers/servo.c

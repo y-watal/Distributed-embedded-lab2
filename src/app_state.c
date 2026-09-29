@@ -43,6 +43,13 @@ bool app_state_get_command(struct wheel_command *command)
     return available;
 }
 
+void app_state_invalidate_command(void)
+{
+    k_mutex_lock(&command_mutex, K_FOREVER);
+    have_command = false;
+    k_mutex_unlock(&command_mutex);
+}
+
 void app_state_wait_for_command(void)
 {
     k_sem_take(&command_available, K_FOREVER);

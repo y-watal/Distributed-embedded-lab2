@@ -1,4 +1,5 @@
 #include "motor.h"
+#include "debug_pins.h"
 
 #include <zephyr/device.h>
 #include <zephyr/drivers/gpio.h>
@@ -129,6 +130,9 @@ static int coast_locked(void)
     current_mode = MOTOR_MODE_COAST;
     current_left_duty = 0;
     current_right_duty = 0;
+
+    // PA7: duty changed to 0 (coast)
+    debug_pin_motor_duty_toggle();
     return 0;
 }
 
@@ -184,6 +188,9 @@ static int drive_locked(uint16_t left_duty, uint16_t right_duty)
     current_mode = MOTOR_MODE_DRIVE;
     current_left_duty = left_duty;
     current_right_duty = right_duty;
+
+    // PA7: a new drive duty was written to the enable PWM
+    debug_pin_motor_duty_toggle();
     return 0;
 }
 

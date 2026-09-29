@@ -1,5 +1,6 @@
 #include "app_state.h"
 #include "communication.h"
+#include "debug_pins.h"
 #include "safety.h"
 
 #include <zephyr/device.h>
@@ -196,6 +197,11 @@ static void parse_byte(uint8_t byte)
         safety_bad_range();
         return;
     }
+
+    // PA6: a new valid Pi command was accepted
+    // Toggle before publishing, since publishing can wake a higher-priority
+    // task that writes the motor duty (PA7) before this thread resumes
+    debug_pin_uart_command_toggle();
 
     // The only path that updates the shared command or its timestamp
     app_state_set_command(&command);

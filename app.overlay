@@ -8,6 +8,11 @@
     };
 };
 
+/* PA6/PA7 are debug GPIO outputs (see debug_pins.c), not SPI1 MISO/MOSI */
+&spi1 {
+    status = "disabled";
+};
+
 /* Left encoder */
 &timers1 {
     status = "okay";

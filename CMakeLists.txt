@@ -20,4 +20,5 @@ target_sources(app PRIVATE
     src/drivers/servo.c
     src/drivers/encoder.c
     src/drivers/led.c
+    src/drivers/debug_pins.c
 )

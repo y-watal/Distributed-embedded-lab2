@@ -16,8 +16,10 @@ invalid header, length, checksum, or field value and scan for the next SOF.
 | 12 | i32 | Raw brake |
 | 16, 17, 18 | u8 | Buttons 4, 5, 10 |
 
-The Pi forwards the most recent UDP update when at least 10 ms have passed
-since its last UART transmission. A valid command refreshes the STM32 link
+The Pi forwards a UDP update only when steering, throttle, brake, or one of
+the three buttons differs from the last frame it sent (the packet counter is
+ignored), with at least 10 ms between UART transmissions. While the controls
+are unchanged it resends the latest state every 50 ms as a keepalive. A valid command refreshes the STM32 link
 timestamp. An out-of-range command is rejected, brakes the motors, starts
 hazards, and sets `BAD_RANGE`. The next valid frame permits recovery. If no
 valid command arrives for 90 ms, safety enters `LINK_TIMEOUT`; this leaves

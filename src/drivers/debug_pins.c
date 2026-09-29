@@ -12,7 +12,7 @@
 /* PA6 / D12: Pi UART command received */
 #define UART_COMMAND_PIN 6
 
-/* PA7 / D11: motor duty cycle written */
+/* PA7 / D11: motor duty cycle written (drive, coast, or brake) */
 #define MOTOR_DUTY_PIN   7
 
 static const struct device *const gpioa =

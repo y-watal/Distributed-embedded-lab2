@@ -113,6 +113,9 @@ static int brake_locked(void)
     current_mode = MOTOR_MODE_BRAKE;
     current_left_duty = 0;
     current_right_duty = 0;
+
+    // PA7: duty changed to brake (inputs low, enables at full period)
+    debug_pin_motor_duty_toggle();
     return 0;
 }
 

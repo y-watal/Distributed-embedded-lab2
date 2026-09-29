@@ -115,6 +115,13 @@ static void stop_blinking(void)
 
 static void start_blinking(enum blink_mode mode)
 {
+    /* Already showing this pattern: leave the timer alone. Restarting it on
+     * every call (e.g. one bad-range frame every 20 ms) resets the phase to
+     * "on" before the half period expires, so the LEDs look solid. */
+    if (atomic_get(&active_mode) == mode) {
+        return;
+    }
+
     stop_blinking();
 
     atomic_set(&active_mode, mode);

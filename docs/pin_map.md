@@ -10,6 +10,6 @@ Pin assignments will be recorded here before wiring peripherals.
 | Pin | Arduino | Function |
 |-----|---------|----------|
 | PA6 | D12 | Toggles on each valid command frame received from the Pi (USART1) |
-| PA7 | D11 | Toggles on each new motor duty cycle written (drive duty change or coast) |
+| PA7 | D11 | Toggles on each new motor duty cycle written (drive duty change, coast, or entering brake) |
 
 SPI1 is disabled in `app.overlay` because the board file assigns PA6/PA7 to it.

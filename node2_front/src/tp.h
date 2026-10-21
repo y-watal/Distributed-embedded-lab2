@@ -30,6 +30,7 @@ enum tp_id {
 	TP_RELAY_TX,  /* relay queued a forwarded frame (N2) */
 	TP_PWM_SET,   /* motor duty written (N3) */
 	TP_DIR_A,     /* unused: on N3 the DIR_A row is the H-bridge IN1 pin itself */
+	TP_TARGET_CHG, /* a CTRL changed the target speed (N3): brake/throttle edge, no PID writes */
 	TP_COUNT
 };
 

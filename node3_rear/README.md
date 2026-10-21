@@ -3,6 +3,9 @@
 The Lab 3 firmware for this zone: the shared dual-CAN layer, heartbeats, heartbeat
 monitoring with degraded LEDs and zone failure, the test points, and the Lab 2
 drivetrain: H-bridge, encoders, PID speed loop and motor current sensors.
+The PID loop is currently compiled out (`DRIVE_PID_ENABLED 0` in `src/drive.c`)
+because the motors aren't connected: DRIVE sets the duty straight from the
+target speed (Lab 2's feedforward, 550-700 /1000).
 Design decisions (catalog, thresholds, priorities, relay): `docs/lab3_design.md`.
 
 Files listed under "shared" in `CMakeLists.txt` are identical in
@@ -19,7 +22,7 @@ current-sensor channels) and the zone's own actuator files differ.
 | `src/current_sensor.c` | Lab 2 current sensors; channels from `node_config.h` (N3: both motors) |
 | `src/motor.c` | Lab 2 L298 H-bridge driver (PA0/PA1 PWM, PB12-15) |
 | `src/encoder.c` | Lab 2 wheel encoders (TIM1, TIM2) |
-| `src/drive.c` | DRIVE (CTRL -> brake / coast / PID target) and PID (10 ms speed loop) |
+| `src/drive.c` | DRIVE (CTRL -> brake / coast / duty from target speed) and PID (10 ms speed loop, compiled out for now) |
 | `src/relay.c` | N2 only: forwards the first copy of every N1/N3 frame to the other bus |
 | `src/report.c` | Console summary once a second |
 | `src/tp.c` | Test points (pins in `app.overlay`, map in `docs/lab3_pin_map.md`) |
@@ -65,13 +68,13 @@ in `src/lab3_config.h` to skip). Then, once a second, with all three nodes up:
   accepted: 0x100 x50 0x101 x50
   ctrl: ok 50 malformed 0 range 0 | last: steer 0 throttle 128 brake 0 buttons 0x0, 3 ms ago
   blink: off, lamps off
-  drive: PID target 327 mm/s | speed L 318 R 322 mm/s | duty L 612 R 598 /1000 | I L 410 mA | I R 395 mA
+  drive: DRIVE target 327 mm/s (open loop, PID off) | duty L 625 R 625 /1000 | I L 410 mA | I R 395 mA
 ```
 
 (Example assumes N2 usually gets the bus A copy first, so its forwards land on bus B; the split between buses can differ, the `accepted` line can't.)
 
 - `drive`: OFF (dynamic brake: zone not NORMAL or CTRL older than 90 ms), BRAKE
-  (brake >= 4), COAST (throttle <= 2) or PID. Motors only run once both other
+  (brake >= 4), COAST (throttle <= 2) or DRIVE (PID when it's enabled). Motors only run once both other
   zones are heard and the Pi is sending CTRL.
 - The `ctrl` line counts CTRL frames accepted / rejected (bad CRC or reserved byte
   = malformed, steering or button bits out of range = range) and shows the last one.
@@ -102,4 +105,4 @@ in `src/lab3_config.h` to skip). Then, once a second, with all three nodes up:
 
 ## Test points driven now
 
-All of this zone's rows: CAN_TX_A/B, CAN_RX_A/B, DEG_A/B, ERR, PWM_SET (every motor duty write), PWM_OUT (left motor PWM), DIR_A (H-bridge IN1), and RL / RR (the rear blinkers).
+All of this zone's rows: CAN_TX_A/B, CAN_RX_A/B, DEG_A/B, ERR, PWM_SET (every duty or brake set: once per CTRL that reaches the motor, plus the fail-safe brake), TARGET_CHG (a CTRL changed the target speed), PWM_OUT (left motor PWM), DIR_A (H-bridge IN1), and RL / RR (the rear blinkers).

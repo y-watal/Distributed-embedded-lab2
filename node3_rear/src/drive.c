@@ -6,11 +6,26 @@
  *  (dynamic brake, drive not allowed: the fail-safe state) unless the zone is
  *  NORMAL and CTRL is fresh; BRAKE when brake >=
  *  CTRL_BRAKE_ACTIVE (brake wins over throttle, applied immediately - this is
- *  the end of the brake chain); COAST at zero throttle; otherwise PID with a
+ *  the end of the brake chain); COAST at zero throttle; otherwise DRIVE with a
  *  target speed from the throttle.
  *
- *  PID (PRIO_PID) runs every PID_PERIOD_MS: encoders -> Lab 2's feedforward +
- *  PI loop -> motor duty, only while the mode is PID.
+ *  The motors aren't connected, so the PID loop is compiled out
+ *  (DRIVE_PID_ENABLED 0): with no encoder feedback it would only wind up.
+ *  Instead DRIVE writes the duty straight from the target speed, using Lab 2's
+ *  feedforward (the duty the PID outputs at zero error). DRIVE sets the motor
+ *  once per CTRL it acts on - a duty (0 = coast) or the brake - and once when
+ *  it drops to OFF; poll wake-ups with no new CTRL leave the motor alone. Each
+ *  of those writes toggles PWM_SET (motor.c), so PWM_SET marks every CTRL that
+ *  reached the motor.
+ *
+ *  TARGET_CHG toggles when a CTRL changes the target speed (throttle step, or
+ *  brake/release that moves it to/from 0), right after DRIVE has applied it.
+ *  It ignores PID duty writes (those are PWM_SET), re-reads of the same CTRL
+ *  on the poll wake-up, and the fail-safe drop to OFF (no message caused it).
+ *
+ *  PID (PRIO_PID, only with DRIVE_PID_ENABLED 1) runs every PID_PERIOD_MS:
+ *  encoders -> Lab 2's feedforward + PI loop -> motor duty, while the mode is
+ *  DRIVE. DRIVE then only sets the target and leaves the duty to PID.
  *
  * drive_lock guards the mode decision and every motor command, so PID can't
  * write a duty after DRIVE has braked. PID computes outside the lock; the
@@ -29,7 +44,11 @@
 #include "hb.h"
 #include "lab3_config.h"
 #include "motor.h"
+#include "tp.h"
 #include "watchdog.h"
+
+/* 1 = Lab 2's closed-loop speed PID (needs the motors and encoders). */
+#define DRIVE_PID_ENABLED 0
 
 #define DRIVE_STACK_SIZE 1024
 #define PID_STACK_SIZE   1536
@@ -49,13 +68,16 @@
 #define CTRL_THROTTLE_DEADBAND 2   /* Lab 2's 300 raw */
 #define CTRL_PEDAL_MAX         255
 
-enum drive_mode { DRIVE_OFF, DRIVE_COAST, DRIVE_BRAKE, DRIVE_PID };
-static const char *const mode_names[] = {"OFF", "COAST", "BRAKE", "PID"};
+enum drive_mode { DRIVE_OFF, DRIVE_COAST, DRIVE_BRAKE, DRIVE_RUN };
+static const char *const mode_names[] = {"OFF", "COAST", "BRAKE",
+					 DRIVE_PID_ENABLED ? "PID" : "DRIVE"};
 
+#if DRIVE_PID_ENABLED
 struct speed_pid {
 	float integral;
 	float previous_speed;
 };
+#endif
 
 K_MUTEX_DEFINE(drive_lock);
 static enum drive_mode mode = DRIVE_OFF; /* drive_lock */
@@ -67,8 +89,11 @@ static atomic_t t_mode = ATOMIC_INIT(DRIVE_OFF);
 static atomic_t t_target, t_speed_l, t_speed_r, t_duty_l, t_duty_r, t_encoder_err;
 
 K_THREAD_STACK_DEFINE(drive_stack, DRIVE_STACK_SIZE);
+static struct k_thread drive_data;
+#if DRIVE_PID_ENABLED
 K_THREAD_STACK_DEFINE(pid_stack, PID_STACK_SIZE);
-static struct k_thread drive_data, pid_data;
+static struct k_thread pid_data;
+#endif
 
 static float clamp_float(float value, float minimum, float maximum)
 {
@@ -84,6 +109,21 @@ static float throttle_to_target_speed(uint8_t throttle)
 	       (CTRL_PEDAL_MAX - CTRL_THROTTLE_DEADBAND);
 }
 
+#if !DRIVE_PID_ENABLED
+/* Open-loop duty for a target speed: Lab 2's feedforward term. */
+static uint16_t target_to_duty(float target)
+{
+	if (target <= 0.0f) {
+		return 0;
+	}
+	float duty = FEEDFORWARD_START_DUTY + (FEEDFORWARD_FULL_DUTY - FEEDFORWARD_START_DUTY) *
+						       target / MAX_TARGET_SPEED_MM_S;
+
+	return (uint16_t)clamp_float(duty, 0.0f, MAX_OUTPUT_DUTY);
+}
+#endif
+
+#if DRIVE_PID_ENABLED
 static void reset_pid(struct speed_pid *pid)
 {
 	pid->integral = 0.0f;
@@ -109,15 +149,16 @@ static uint16_t speed_to_duty(struct speed_pid *pid, float target, float measure
 	pid->previous_speed = measured;
 	return (uint16_t)clamp_float(output, 0.0f, MAX_OUTPUT_DUTY);
 }
+#endif /* DRIVE_PID_ENABLED */
 
 static void set_mode_locked(enum drive_mode m)
 {
-	if (m != mode && (m == DRIVE_PID || mode == DRIVE_PID)) {
+	if (m != mode && (m == DRIVE_RUN || mode == DRIVE_RUN)) {
 		pid_epoch++;
 	}
 	mode = m;
 	atomic_set(&t_mode, m);
-	if (m != DRIVE_PID) {
+	if (m != DRIVE_RUN) {
 		atomic_set(&t_duty_l, 0);
 		atomic_set(&t_duty_r, 0);
 	}
@@ -125,6 +166,8 @@ static void set_mode_locked(enum drive_mode m)
 
 static void drive_thread(void *p1, void *p2, void *p3)
 {
+	float cmd_target = 0.0f; /* target set by the last CTRL acted on */
+
 	ARG_UNUSED(p1);
 	ARG_UNUSED(p2);
 	ARG_UNUSED(p3);
@@ -133,8 +176,9 @@ static void drive_thread(void *p1, void *p2, void *p3)
 		struct ctrl_cmd cmd;
 		uint32_t age;
 
-		ctrl_wait(K_MSEC(ACTUATOR_POLL_MS));
-
+		/* true: a CTRL arrived (or a reject / test-button kick, which takes
+		 * the zone out of NORMAL first and so lands in the !ok branch). */
+		bool woke = ctrl_wait(K_MSEC(ACTUATOR_POLL_MS));
 		bool ok = hb_zone_state() == ZONE_NORMAL && ctrl_get(&cmd, &age) &&
 			  age < CTRL_TIMEOUT_MS;
 
@@ -146,10 +190,14 @@ static void drive_thread(void *p1, void *p2, void *p3)
 			}
 			target_mm_s = 0.0f;
 		} else {
+			/* Act on a new CTRL, or on the current one when leaving OFF. */
+			bool apply = woke;
+
 			if (mode == DRIVE_OFF && motor_set_drive_allowed(true) == 0) {
 				set_mode_locked(DRIVE_COAST);
+				apply = true;
 			}
-			if (mode != DRIVE_OFF) {
+			if (mode != DRIVE_OFF && apply) {
 				if (cmd.brake >= CTRL_BRAKE_ACTIVE) {
 					motor_brake(); /* brake wins over throttle and PID */
 					set_mode_locked(DRIVE_BRAKE);
@@ -160,8 +208,22 @@ static void drive_thread(void *p1, void *p2, void *p3)
 						motor_set_duties_permille(0, 0); /* coast */
 						set_mode_locked(DRIVE_COAST);
 					} else {
-						set_mode_locked(DRIVE_PID);
+#if DRIVE_PID_ENABLED
+						set_mode_locked(DRIVE_RUN); /* PID writes the duty */
+#else
+						uint16_t duty = target_to_duty(target_mm_s);
+
+						if (motor_set_duties_permille(duty, duty) == 0) {
+							set_mode_locked(DRIVE_RUN);
+							atomic_set(&t_duty_l, duty);
+							atomic_set(&t_duty_r, duty);
+						}
+#endif
 					}
+				}
+				if (target_mm_s != cmd_target) {
+					tp_toggle(TP_TARGET_CHG); /* this CTRL changed the target */
+					cmd_target = target_mm_s;
 				}
 			}
 		}
@@ -171,6 +233,7 @@ static void drive_thread(void *p1, void *p2, void *p3)
 	}
 }
 
+#if DRIVE_PID_ENABLED
 static void pid_thread(void *p1, void *p2, void *p3)
 {
 	struct speed_pid left_pid = {0}, right_pid = {0};
@@ -189,7 +252,7 @@ static void pid_thread(void *p1, void *p2, void *p3)
 		k_sleep(K_TIMEOUT_ABS_MS(next));
 
 		k_mutex_lock(&drive_lock, K_FOREVER);
-		bool active = mode == DRIVE_PID;
+		bool active = mode == DRIVE_RUN;
 		float target = target_mm_s;
 		uint32_t epoch = pid_epoch;
 		k_mutex_unlock(&drive_lock);
@@ -231,7 +294,7 @@ static void pid_thread(void *p1, void *p2, void *p3)
 
 		/* Write only if DRIVE hasn't changed the mode while we computed. */
 		k_mutex_lock(&drive_lock, K_FOREVER);
-		if (mode == DRIVE_PID && pid_epoch == epoch_seen &&
+		if (mode == DRIVE_RUN && pid_epoch == epoch_seen &&
 		    motor_set_duties_permille(duty_l, duty_r) == 0) {
 			atomic_set(&t_duty_l, duty_l);
 			atomic_set(&t_duty_r, duty_r);
@@ -239,6 +302,7 @@ static void pid_thread(void *p1, void *p2, void *p3)
 		k_mutex_unlock(&drive_lock);
 	}
 }
+#endif /* DRIVE_PID_ENABLED */
 
 void app_on_frame(const struct can_frame *frame, int bus)
 {
@@ -266,9 +330,11 @@ int app_init(void)
 		return ret;
 	}
 
+#if DRIVE_PID_ENABLED
 	k_thread_create(&pid_data, pid_stack, K_THREAD_STACK_SIZEOF(pid_stack), pid_thread, NULL,
 			NULL, NULL, PRIO_PID, 0, K_NO_WAIT);
 	k_thread_name_set(&pid_data, "pid");
+#endif
 	k_thread_create(&drive_data, drive_stack, K_THREAD_STACK_SIZEOF(drive_stack),
 			drive_thread, NULL, NULL, NULL, PRIO_DRIVE, 0, K_NO_WAIT);
 	k_thread_name_set(&drive_data, "drive");
@@ -279,10 +345,15 @@ void app_report(void)
 {
 	int32_t ma;
 
-	printk("  drive: %s target %ld mm/s | speed L %ld R %ld mm/s | duty L %ld R %ld /1000",
-	       mode_names[atomic_get(&t_mode)], (long)atomic_get(&t_target),
-	       (long)atomic_get(&t_speed_l), (long)atomic_get(&t_speed_r),
-	       (long)atomic_get(&t_duty_l), (long)atomic_get(&t_duty_r));
+	printk("  drive: %s target %ld mm/s", mode_names[atomic_get(&t_mode)],
+	       (long)atomic_get(&t_target));
+	if (DRIVE_PID_ENABLED) {
+		printk(" | speed L %ld R %ld mm/s", (long)atomic_get(&t_speed_l),
+		       (long)atomic_get(&t_speed_r));
+	} else {
+		printk(" (open loop, PID off)");
+	}
+	printk(" | duty L %ld R %ld /1000", (long)atomic_get(&t_duty_l), (long)atomic_get(&t_duty_r));
 	if (atomic_get(&t_encoder_err)) {
 		printk(" | encoder errors %ld", (long)atomic_get(&t_encoder_err));
 	}

@@ -2,6 +2,11 @@
  * Ported from Lab 2 src/drivers/motor.c. Changes: pins and PWM channels come
  * from the devicetree (zephyr,user hbridge-gpios, pwms "motor_left" /
  * "motor_right"), and the PA7 debug toggle is now the PWM_SET test point.
+ *
+ * PWM_SET toggles on every successful motor_brake(), motor_set_duties_permille()
+ * and motor_set_drive_allowed(false) call, even when the output was already
+ * in that state (the hardware write is skipped then, the edge isn't). Not on
+ * motor_init() or motor_set_drive_allowed(true) (an enable, not a command).
  */
 #include "motor.h"
 
@@ -98,7 +103,6 @@ static int brake_locked(void)
 	current_mode = MOTOR_MODE_BRAKE;
 	current_left_duty = 0;
 	current_right_duty = 0;
-	tp_toggle(TP_PWM_SET); /* duty changed: brake */
 	return 0;
 }
 
@@ -116,7 +120,6 @@ static int coast_locked(void)
 	current_mode = MOTOR_MODE_COAST;
 	current_left_duty = 0;
 	current_right_duty = 0;
-	tp_toggle(TP_PWM_SET); /* duty changed: 0, coast */
 	return 0;
 }
 
@@ -150,7 +153,6 @@ static int drive_locked(uint16_t left_duty, uint16_t right_duty)
 	current_mode = MOTOR_MODE_DRIVE;
 	current_left_duty = left_duty;
 	current_right_duty = right_duty;
-	tp_toggle(TP_PWM_SET); /* a new drive duty was written */
 	return 0;
 }
 
@@ -208,6 +210,8 @@ int motor_set_drive_allowed(bool allowed)
 		if (ret < 0) {
 			disable_outputs();
 			current_mode = MOTOR_MODE_UNKNOWN;
+		} else {
+			tp_toggle(TP_PWM_SET); /* brake set (fail-safe) */
 		}
 	}
 	k_mutex_unlock(&motor_mutex);
@@ -227,6 +231,8 @@ int motor_brake(void)
 	if (ret < 0) {
 		disable_outputs();
 		current_mode = MOTOR_MODE_UNKNOWN;
+	} else {
+		tp_toggle(TP_PWM_SET); /* brake set */
 	}
 	k_mutex_unlock(&motor_mutex);
 	return ret;
@@ -254,6 +260,8 @@ int motor_set_duties_permille(uint16_t left_duty, uint16_t right_duty)
 	if (ret < 0) {
 		disable_outputs();
 		current_mode = MOTOR_MODE_UNKNOWN;
+	} else {
+		tp_toggle(TP_PWM_SET); /* duty set (0 = coast) */
 	}
 	k_mutex_unlock(&motor_mutex);
 	return ret;

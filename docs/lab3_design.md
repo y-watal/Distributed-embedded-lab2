@@ -110,8 +110,8 @@ Lower number = higher priority (`lab3_config.h`).
 | relay | N2 | 3 | Forward first copies to the other bus, RELAY_TX. Above dispatch: it's on N3's brake path |
 | dispatch | both | 4 | Dedup by (ID, seq), record heartbeat times per bus, check CTRL (CRC, range), store it and wake the actuator task |
 | steer | N2 | 5 | On every valid CTRL (and every 5 ms): servo follows the wheel while NORMAL and CTRL fresh, else centers |
-| drive | N3 | 5 | On every valid CTRL (and every 5 ms): brake / coast / PID target; dynamic brake unless NORMAL and CTRL fresh |
-| pid | N3 | 6 | Every 10 ms: encoders -> Lab 2 feedforward + PI -> motor duty, while the mode is PID |
+| drive | N3 | 5 | On every valid CTRL (and every 5 ms): brake / coast / duty from target speed (PID target when PID is on); dynamic brake unless NORMAL and CTRL fresh |
+| pid | N3 | 6 | Every 10 ms: encoders -> Lab 2 feedforward + PI -> motor duty, while driving. **Compiled out for now** (`DRIVE_PID_ENABLED 0`, motors not connected): DRIVE writes the feedforward duty itself |
 | blink | both | 5 | BLINK_F / BLINK_R: lamps follow the cockpit's BLINK as soon as it arrives; local hazards if the cockpit can't be heard or the zone is ISOLATED |
 | test_btn | both | 5 | USER button B1 (ISR gives a semaphore, 50 ms debounce lockout): single press = local fault, double press = recover |
 | hb_tx | both | 7 | HB every 20 ms (k_timer, no drift) on both buses |

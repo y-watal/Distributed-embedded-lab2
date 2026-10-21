@@ -38,6 +38,9 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <dirent.h>
+#include <libgen.h>
+#include <limits.h>
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
@@ -85,8 +88,10 @@ static struct {
 	int rt_prio; /* 0: normal scheduling */
 	int cpu;     /* -1: no pinning */
 	bool quiet;
-	bool no_flush;
-} opt = {"0.0.0.0", 8765, NULL, 8001, {"can0", "can1"}, 500000, 0, -1, false, false};
+	bool flush; /* bounce an interface when its bus goes degraded (opt-in) */
+	bool if_given[2]; /* --can-a / --can-b given: don't auto-detect that one */
+} opt = {"0.0.0.0", 8765, NULL, 8001, {"can0", "can1"}, 500000, 0, -1, false, false, {false, false}};
+static bool test_mode; /* COCKPIT_TEST_FD_* in use: no real interfaces */
 
 /* ---- Sockets ---- */
 static int can_fd[NUM_BUSES] = {-1, -1};
@@ -126,6 +131,8 @@ static atomic_uint tx_ok[NUM_BUSES], tx_err[NUM_BUSES], tx_skip[NUM_BUSES], err_
 static atomic_uint rx_count[NUM_BUSES][NUM_SLOTS];
 static atomic_bool busoff[NUM_BUSES];
 static atomic_ullong lat_sum_ns, lat_max_ns, lat_all_max_ns;
+static atomic_ullong udp_gap_max_ns, udp_gap_all_max_ns; /* longest wait between wheel packets */
+static atomic_uint udp_gaps_over; /* gaps longer than UDP_TIMEOUT_NS */
 static atomic_uint lat_n;
 
 static uint8_t tx_seq[NUM_SLOTS];
@@ -185,6 +192,54 @@ static void send_both(uint32_t id, uint8_t data[FRAME_DLC], bool include_degrade
 /* CAN setup                                                             */
 /* ===================================================================== */
 
+/*
+ * Linux names the two MCP2515 interfaces can0/can1 in whatever order they
+ * probe, which can change between boots. Bus A is the module on SPI0 CE0
+ * (spi0.0) and bus B the one on CE1 (spi0.1) - that's the wiring - so pick
+ * the interfaces by their SPI device, not by name.
+ */
+static void resolve_interfaces(void)
+{
+	static char found[NUM_BUSES][IFNAMSIZ];
+	static const char *const spi_dev[NUM_BUSES] = {"spi0.0", "spi0.1"};
+	DIR *d = opendir("/sys/class/net");
+	struct dirent *e;
+
+	if (!d) {
+		return;
+	}
+	while ((e = readdir(d)) != NULL) {
+		char path[PATH_MAX], target[PATH_MAX];
+		ssize_t n;
+
+		if (strncmp(e->d_name, "can", 3) != 0) {
+			continue;
+		}
+		snprintf(path, sizeof(path), "/sys/class/net/%s/device", e->d_name);
+		n = readlink(path, target, sizeof(target) - 1);
+		if (n <= 0) {
+			continue;
+		}
+		target[n] = '\0';
+		for (int bus = 0; bus < NUM_BUSES; bus++) {
+			if (strcmp(basename(target), spi_dev[bus]) == 0 &&
+			    strlen(e->d_name) < IFNAMSIZ) {
+				memcpy(found[bus], e->d_name, strlen(e->d_name) + 1);
+			}
+		}
+	}
+	closedir(d);
+	for (int bus = 0; bus < NUM_BUSES; bus++) {
+		if (found[bus][0] && !opt.if_given[bus]) {
+			opt.ifname[bus] = found[bus];
+		}
+	}
+	if (found[BUS_A][0] || found[BUS_B][0]) {
+		printf("bus A = %s (SPI0 CE0), bus B = %s (SPI0 CE1)\n", opt.ifname[BUS_A],
+		       opt.ifname[BUS_B]);
+	}
+}
+
 static int can_open(const char *ifname)
 {
 	int fd = socket(PF_CAN, SOCK_RAW, CAN_RAW);
@@ -224,9 +279,11 @@ static int can_open(const char *ifname)
 }
 
 /*
- * A link with no ACK keeps retrying what's queued; when it comes back, those
- * stale frames go out first. Bouncing the interface drops them. Needs root;
- * runs in its own thread so the timer isn't held up by `ip`.
+ * Optional (--flush, needs root): a link with no ACK keeps retrying what's
+ * queued; when it comes back, those stale frames go out first. Bouncing the
+ * interface drops them. Off by default: if `ip` fails to bring the interface
+ * back up, the cockpit goes deaf on that bus. Runs in its own thread so the
+ * timer isn't held up by `ip`.
  */
 static void *flush_thread(void *arg)
 {
@@ -237,16 +294,31 @@ static void *flush_thread(void *arg)
 		 "ip link set %s down && ip link set %s up type can bitrate %d restart-ms 100",
 		 opt.ifname[bus], opt.ifname[bus], opt.bitrate);
 	if (system(cmd) != 0) {
-		fprintf(stderr, "flush of %s failed\n", opt.ifname[bus]);
+		fprintf(stderr, "flush of %s failed: run ./can_up.sh\n", opt.ifname[bus]);
 	}
 	return NULL;
+}
+
+/* "up", "DOWN" or "?" for the report. */
+static const char *if_state(int bus)
+{
+	struct ifreq ifr = {0};
+
+	if (test_mode) {
+		return "up";
+	}
+	snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", opt.ifname[bus]);
+	if (ioctl(can_fd[bus], SIOCGIFFLAGS, &ifr) < 0) {
+		return "?";
+	}
+	return (ifr.ifr_flags & IFF_UP) && (ifr.ifr_flags & IFF_RUNNING) ? "up" : "DOWN";
 }
 
 static void flush_bus(int bus)
 {
 	pthread_t t;
 
-	if (opt.no_flush || geteuid() != 0) {
+	if (!opt.flush || test_mode || geteuid() != 0) {
 		return;
 	}
 	if (pthread_create(&t, NULL, flush_thread, (void *)(intptr_t)bus) == 0) {
@@ -377,6 +449,19 @@ static void udp_loop(void)
 
 		/* Everything below is off the brake path. */
 		pthread_mutex_lock(&lock);
+		if (have_udp) {
+			unsigned long long gap = t0 - last_udp_ns, prev;
+
+			prev = atomic_load(&udp_gap_max_ns);
+			while (gap > prev && !atomic_compare_exchange_weak(&udp_gap_max_ns, &prev, gap)) {
+			}
+			prev = atomic_load(&udp_gap_all_max_ns);
+			while (gap > prev && !atomic_compare_exchange_weak(&udp_gap_all_max_ns, &prev, gap)) {
+			}
+			if (gap >= UDP_TIMEOUT_NS) {
+				atomic_fetch_add(&udp_gaps_over, 1);
+			}
+		}
 		last_udp_ns = t0;
 		have_udp = true;
 		last_cmd = cmd;
@@ -715,9 +800,13 @@ static void *report_thread(void *arg)
 			printf("  peer fault codes: N2 0x%02x N3 0x%02x\n", c2, c3);
 		}
 		if (hu) {
-			printf("  wheel: %u pkt/s, last %llu ms ago | CTRL sent %u | raw steer %d thr %d "
-			       "brk %d -> steer %d thr %u brk %u btn 0x%x | blink %s\n",
+			unsigned over = atomic_exchange(&udp_gaps_over, 0);
+
+			printf("  wheel: %u pkt/s, last %llu ms ago, longest gap %llu ms (all-time %llu ms)%s\n",
 			       atomic_exchange(&udp_count, 0), (unsigned long long)udp_age,
+			       atomic_exchange(&udp_gap_max_ns, 0) / MS, atomic_load(&udp_gap_all_max_ns) / MS,
+			       over ? " <- over the 90 ms timeout" : "");
+			printf("  CTRL sent %u | raw steer %d thr %d brk %d -> steer %d thr %u brk %u btn 0x%x | blink %s\n",
 			       atomic_exchange(&ctrl_sent, 0), raw[0], raw[1], raw[2], c.steer,
 			       c.throttle, c.brake, c.buttons, blink_names[bm]);
 		} else {
@@ -729,8 +818,14 @@ static void *report_thread(void *arg)
 			       sum / n / 1000, mx / 1000, atomic_load(&lat_all_max_ns) / 1000);
 		}
 		for (int bus = 0; bus < NUM_BUSES; bus++) {
-			printf("  %c %s: DEG %d | tx ok %u err %u skip %u | error frames %u | rx:", 'A' + bus,
-			       opt.ifname[bus], d[bus], atomic_exchange(&tx_ok[bus], 0),
+			const char *st = if_state(bus);
+
+			if (st[0] == 'D') {
+				printf("  *** %s is DOWN: run ./can_up.sh (the cockpit can't send or receive on it) ***\n",
+				       opt.ifname[bus]);
+			}
+			printf("  %c %s (%s): DEG %d | tx ok %u err %u skip %u | error frames %u | rx:", 'A' + bus,
+			       opt.ifname[bus], st, d[bus], atomic_exchange(&tx_ok[bus], 0),
 			       atomic_exchange(&tx_err[bus], 0), atomic_exchange(&tx_skip[bus], 0),
 			       atomic_exchange(&err_frames[bus], 0));
 			bool any = false;
@@ -835,12 +930,13 @@ static void usage(const char *prog)
 	       "  --bind ADDR       local address to listen on (default 0.0.0.0)\n"
 	       "  --force-host IP   where FORCE goes (default: the wheel packets' sender)\n"
 	       "  --force-port N    proxy's force port (default 8001)\n"
-	       "  --can-a IF        bus A interface (default can0)\n"
-	       "  --can-b IF        bus B interface (default can1)\n"
+	       "  --can-a IF        bus A interface (default: the one on SPI0 CE0, else can0)\n"
+	       "  --can-b IF        bus B interface (default: the one on SPI0 CE1, else can1)\n"
 	       "  --bitrate N       used when re-raising a flushed interface (default 500000)\n"
 	       "  --rt PRIO         SCHED_FIFO: UDP thread PRIO, CAN rx PRIO-1, timer PRIO-2 (sudo)\n"
 	       "  --cpu N           pin all threads to CPU N\n"
-	       "  --no-flush        don't bounce an interface when its bus goes degraded\n"
+	       "  --flush           bounce an interface (ip link down/up, needs root) when its bus\n"
+	       "                    goes degraded, to drop stale queued frames (off by default)\n"
 	       "  --quiet           no once-a-second summary\n"
 	       "While running, type m / r (corrupt the next CTRL), t / c (test fault on / off), q.\n"
 	       "Signals: SIGUSR1 = next CTRL bad CRC, SIGUSR2 = next CTRL out of range.\n",
@@ -855,6 +951,7 @@ int main(int argc, char **argv)
 		{"can-a", required_argument, 0, 'A'},  {"can-b", required_argument, 0, 'B'},
 		{"bitrate", required_argument, 0, 'r'}, {"rt", required_argument, 0, 'R'},
 		{"cpu", required_argument, 0, 'c'},    {"no-flush", no_argument, 0, 'n'},
+		{"flush", no_argument, 0, 'f'},
 		{"quiet", no_argument, 0, 'q'},        {"help", no_argument, 0, 'h'},
 		{0, 0, 0, 0}};
 	int ch;
@@ -865,12 +962,13 @@ int main(int argc, char **argv)
 		case 'b': opt.bind_addr = optarg; break;
 		case 'H': opt.force_host = optarg; break;
 		case 'P': opt.force_port = atoi(optarg); break;
-		case 'A': opt.ifname[BUS_A] = optarg; break;
-		case 'B': opt.ifname[BUS_B] = optarg; break;
+		case 'A': opt.ifname[BUS_A] = optarg; opt.if_given[BUS_A] = true; break;
+		case 'B': opt.ifname[BUS_B] = optarg; opt.if_given[BUS_B] = true; break;
 		case 'r': opt.bitrate = atoi(optarg); break;
 		case 'R': opt.rt_prio = atoi(optarg); break;
 		case 'c': opt.cpu = atoi(optarg); break;
-		case 'n': opt.no_flush = true; break;
+		case 'n': opt.flush = false; break; /* default now; kept for old command lines */
+		case 'f': opt.flush = true; break;
 		case 'q': opt.quiet = true; break;
 		default: usage(argv[0]); return ch == 'h' ? 0 : 2;
 		}
@@ -884,6 +982,9 @@ int main(int argc, char **argv)
 	tp_set(TP_DEG_A, 1);
 	tp_set(TP_DEG_B, 1);
 
+	if (!getenv("COCKPIT_TEST_FD_A")) {
+		resolve_interfaces();
+	}
 	for (int bus = 0; bus < NUM_BUSES; bus++) {
 		/*
 		 * Test hook (test_cockpit.py): use an inherited socket pair instead
@@ -894,13 +995,20 @@ int main(int argc, char **argv)
 
 		if (test_fd) {
 			can_fd[bus] = atoi(test_fd);
-			opt.no_flush = true;
+			test_mode = true;
 			fcntl(can_fd[bus], F_SETFL, fcntl(can_fd[bus], F_GETFL) | O_NONBLOCK);
 			continue;
 		}
 		can_fd[bus] = can_open(opt.ifname[bus]);
 		if (can_fd[bus] < 0) {
 			fprintf(stderr, "%s: %s (run ./can_up.sh first)\n", opt.ifname[bus], strerror(errno));
+			return 1;
+		}
+	}
+
+	for (int bus = 0; bus < NUM_BUSES; bus++) {
+		if (if_state(bus)[0] == 'D') {
+			fprintf(stderr, "%s is down: run ./can_up.sh first\n", opt.ifname[bus]);
 			return 1;
 		}
 	}

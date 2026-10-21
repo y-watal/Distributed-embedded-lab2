@@ -13,8 +13,9 @@ stream from the Mac proxy and drives both CAN buses:
 - **HB_N1 every 20 ms** (Lab 1 layout: state, LOCAL_FAULT, degraded/bus-off bits).
 - **HB_MON**: DEG_A/B after 44 ms without another zone on that bus, a zone
   lost after 66 ms on both buses, the zone state and ERR. A bus that goes
-  degraded is skipped for everything but heartbeats, and (as root) bounced
-  with `ip link` so stale frames don't go out when it comes back.
+  degraded is skipped for everything but heartbeats. (`--flush` additionally
+  bounces the interface with `ip link` to drop stale queued frames; off by
+  default, since a failed bounce leaves the interface down.)
 - **Faults**: wheel button 10 = cockpit test button (single press fails the
   zone, double press recovers); no wheel packet for 90 ms = UDP_TIMEOUT. Both
   send FAULT_N1 and set LOCAL_FAULT in HB_N1. A FAULT or LOCAL_FAULT from N2/N3
@@ -47,7 +48,7 @@ dmesg | grep -i mcp251     # both controllers should probe
 ```
 make
 ./can_up.sh                       # both interfaces up at 500 kbit/s
-sudo ./cockpit                    # sudo: interface flush on a degraded bus
+./cockpit                         # refuses to start if can0/can1 are down
 sudo ./cockpit --rt 80 --cpu 3    # SCHED_FIFO + pinned to core 3, for latency runs
 ./cockpit --help                  # ports, interfaces, options
 ```
@@ -70,6 +71,16 @@ fault on / off), `q` to quit. Once a second it prints:
 The latency line is the software time from the wheel packet arriving to both
 CTRL writes returning; the report's Pi-stage number comes from the scope
 (UDP_RX to CMD_TX), with and without load.
+
+If the summary prints `*** can0 is DOWN ***`, or every peer shows `LOST`
+while the Nucleos are running, run `./can_up.sh` again.
+
+**can0 / can1 aren't fixed.** Linux names the two modules in the order they
+probe, which can change between boots. Bus A is the module on SPI0 CE0 and
+bus B the one on CE1, so `cockpit`, `can_test.py` and `can_up.sh` look the
+interfaces up by chip-select and print `bus A = can1 (SPI0 CE0)` etc. at
+start. When you use `candump` or `cansend` by hand, check that line (or
+`readlink /sys/class/net/can0/device`) to know which interface is which bus.
 
 ## Testing without CAN hardware
 

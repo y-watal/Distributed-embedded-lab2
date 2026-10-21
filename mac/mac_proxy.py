@@ -158,7 +158,7 @@ def main():
     ap.add_argument("--remote", default="192.168.2.2",
                     help="Pi address to send wheel state to")
     ap.add_argument("--send-port", type=int, default=8765)
-    ap.add_argument("--listen", default="192.168.2.1",
+    ap.add_argument("--listen", default="0.0.0.0",
                     help="local interface to receive the force packet on")
     ap.add_argument("--recv-port", type=int, default=8001)
     ap.add_argument("--interval-ms", type=int, default=20,

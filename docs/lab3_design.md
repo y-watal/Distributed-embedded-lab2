@@ -156,8 +156,9 @@ of the 2 ms brake chain.
 
 Writes are non-blocking: a bus with no ACK fills its queue and the write
 fails instead of stalling the brake path. A degraded bus gets only
-heartbeats, and as root the program bounces the interface when the bus goes
-degraded so queued stale frames are dropped.
+heartbeats. Bouncing the interface to drop queued stale frames is opt-in
+(`--flush`): a bounce that failed to bring the interface back up left the
+cockpit deaf and mute on both buses during bring-up.
 
 ## Zone state and fault protocol
 

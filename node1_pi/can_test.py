@@ -23,6 +23,7 @@ Run ./can_up.sh first. Needs python-can: sudo apt install python3-can
 """
 import argparse
 import json
+import os
 import subprocess
 import threading
 import time
@@ -52,6 +53,24 @@ MONITOR_PERIOD_S = 0.005
 
 BUSES = {"A": "can0", "B": "can1"}
 PEERS = (N2, N3)
+
+
+def resolve_buses():
+    """Bus A = the interface on SPI0 CE0 (spi0.0), bus B = CE1 (spi0.1).
+
+    Linux names can0/can1 in probe order, which can change between boots."""
+    import glob
+    for path in glob.glob("/sys/class/net/can*/device"):
+        try:
+            dev = os.path.basename(os.readlink(path))
+        except OSError:
+            continue
+        name = path.split("/")[4]
+        if dev == "spi0.0":
+            BUSES["A"] = name
+        elif dev == "spi0.1":
+            BUSES["B"] = name
+    print(f"bus A = {BUSES['A']} (SPI0 CE0), bus B = {BUSES['B']} (SPI0 CE1)")
 
 lock = threading.Lock()
 rx_raw = {name: {} for name in BUSES}    # id -> copies received on that bus
@@ -172,6 +191,7 @@ def main():
     ap.add_argument("--no-walk", action="store_true", help="skip the start-up test point walk")
     args = ap.parse_args()
 
+    resolve_buses()
     if not args.no_walk:
         print("Test point walk:")
         walk()

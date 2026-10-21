@@ -1,0 +1,47 @@
+/*
+ * Two XIAO CAN modules (MCP2515 + SN65HVD230) on SPI1, Arduino header.
+ *
+ *   Module   Function   Nucleo
+ *   D8       SCK        D13 / PA5   (shared; PA5 is also the user LED LD2)
+ *   D10      MOSI       D11 / PA7   (shared)
+ *   D9       MISO       D12 / PA6   (shared)
+ *   D7       CS         CAN A: D10 / PB6    CAN B: D9 / PC7
+ *   D6       INT        CAN A: D2  / PA10   CAN B: D4 / PB5
+ *
+ * osc-freq must match the crystal printed on the module's metal can.
+ */
+#include <zephyr/dt-bindings/gpio/gpio.h>
+
+/ {
+	aliases {
+		can-a = &can_a;
+		can-b = &can_b;
+	};
+};
+
+&spi1 {
+	status = "okay";
+	cs-gpios = <&gpiob 6 GPIO_ACTIVE_LOW>,	/* reg 0: CAN A */
+		   <&gpioc 7 GPIO_ACTIVE_LOW>;	/* reg 1: CAN B */
+
+	can_a: can@0 {
+		compatible = "microchip,mcp2515";
+		reg = <0>;
+		/* Conservative for breadboard jumpers; MCP2515 maximum is 10 MHz. */
+		spi-max-frequency = <1000000>;
+		int-gpios = <&gpioa 10 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+		osc-freq = <16000000>;
+		bitrate = <500000>;
+		status = "okay";
+	};
+
+	can_b: can@1 {
+		compatible = "microchip,mcp2515";
+		reg = <1>;
+		spi-max-frequency = <1000000>;
+		int-gpios = <&gpiob 5 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+		osc-freq = <16000000>;
+		bitrate = <500000>;
+		status = "okay";
+	};
+};

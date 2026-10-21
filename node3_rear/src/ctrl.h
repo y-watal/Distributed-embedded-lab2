@@ -25,6 +25,9 @@ bool ctrl_fresh(void);
 /* Blocks until a new valid command arrives or timeout; true if one arrived. */
 bool ctrl_wait(k_timeout_t timeout);
 
+/* Wakes the actuator task early (e.g. the zone just left NORMAL). */
+void ctrl_kick(void);
+
 struct ctrl_stats {
 	atomic_t ok, malformed, out_of_range;
 	atomic_t last_fault; /* enum fault_code of the last rejected frame */

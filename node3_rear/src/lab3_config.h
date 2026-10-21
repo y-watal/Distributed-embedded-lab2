@@ -48,6 +48,24 @@
 #define PID_PERIOD_MS     10 /* N3 speed loop (template: PID every 10 ms) */
 #define CURRENT_PERIOD_MS 20 /* current sensor sampling */
 
+/* Zone state machine (docs/lab3_design.md, "Zone state and fault protocol") */
+#define TEST_BTN_DEBOUNCE_MS 50   /* template: TEST_BTN min interarrival 50 ms */
+#define DOUBLE_PRESS_MS      350  /* second press within this clears the test fault */
+#define CTRL_FAULT_HOLD_MS   1000 /* a rejected CTRL keeps the zone in error this long */
+#define FAULT_CLEAR_HOLD_MS  (HB_MAX_INTERVAL_MS + 3) /* older HB may overtake a FAULT */
+#define FAULT_MIN_GAP_MS     20   /* catalog: FAULT min interval */
+
+/* Blinkers */
+#define BLINK_HALF_MS  500  /* local hazard rate when the cockpit can't be heard (1 Hz) */
+#define BLINK_STALE_MS 1100 /* no BLINK for this long: flash hazards locally */
+
+/* FORCE_TX (N2): dummy counter every 50 ms */
+#define FORCE_PERIOD_MS 50
+
+/* Independent watchdog (R4.5): fed only while HB_TX and the actuator task check in. */
+#define WDT_TIMEOUT_MS 250
+#define WDT_CHECK_MS   100
+
 /* Boot-time test point walk, ms per point; 0 skips it. */
 #define TP_WALK_MS 300
 
@@ -61,9 +79,12 @@
 #define PRIO_DISPATCH 4
 #define PRIO_DRIVE    5 /* N3: acts on CTRL (brake path, local deadline 0.5 ms) */
 #define PRIO_STEER    5 /* N2: acts on CTRL (local deadline 1 ms) */
+#define PRIO_BLINK    5 /* BLINK_F / BLINK_R: 0.5 ms from reception */
+#define PRIO_TEST_BTN 5 /* local fail within 10 ms (R2.5) */
 #define PRIO_PID      6 /* N3: speed loop every 10 ms */
 #define PRIO_HB_TX    7
-#define PRIO_HB_MON   8
+#define PRIO_HB_MON   8 /* also runs the zone state machine and feeds the watchdog */
+#define PRIO_FORCE    9 /* N2: FORCE every 50 ms */
 #define PRIO_CURRENT  10
 #define PRIO_REPORT   12
 

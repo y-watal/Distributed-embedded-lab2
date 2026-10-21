@@ -6,6 +6,8 @@ project(node3_rear)
 target_sources(app PRIVATE
     # shared with node2_front (identical files)
     src/main.c
+    src/blink.c
+    src/button.c
     src/canbus.c
     src/ctrl.c
     src/current_sensor.c
@@ -13,6 +15,8 @@ target_sources(app PRIVATE
     src/relay.c
     src/report.c
     src/tp.c
+    src/watchdog.c
+    src/zone.c
     # N3 only: drivetrain zone
     src/motor.c
     src/encoder.c

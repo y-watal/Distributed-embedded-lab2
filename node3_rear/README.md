@@ -59,11 +59,12 @@ At boot every test point goes high for 300 ms in turn (set `TP_WALK_MS` to 0
 in `src/lab3_config.h` to skip). Then, once a second, with all three nodes up:
 
 ```
-[N3 12.000s] NORMAL | peers: N1 ok N2 ok | dup 150 echo 50
+[N3 12.000s] NORMAL | peers: N1 NORMAL N2 NORMAL | dup 150 echo 50
   A: error-active tec=0 rec=0 DEG 0 | tx ok=50 err=0 full=0 skip=0 | rx: 0x100 x50 0x101 x50
   B: error-active tec=0 rec=0 DEG 0 | tx ok=50 err=0 full=0 skip=0 | rx: 0x100 x100 0x101 x50 0x102 x50
   accepted: 0x100 x50 0x101 x50
   ctrl: ok 50 malformed 0 range 0 | last: steer 0 throttle 128 brake 0 buttons 0x0, 3 ms ago
+  blink: off, lamps off
   drive: PID target 327 mm/s | speed L 318 R 322 mm/s | duty L 612 R 598 /1000 | I L 410 mA | I R 395 mA
 ```
 
@@ -74,6 +75,18 @@ in `src/lab3_config.h` to skip). Then, once a second, with all three nodes up:
   zones are heard and the Pi is sending CTRL.
 - The `ctrl` line counts CTRL frames accepted / rejected (bad CRC or reserved byte
   = malformed, steering or button bits out of range = range) and shows the last one.
+- State: BOOT until both other zones are heard and CTRL arrives; NORMAL;
+  SYS_ERROR (ERR high) with a local fault, a lost zone or a faulted / not-ready
+  zone; ISOLATED (fail-safe, local hazards) when no other zone is heard.
+  `(local fault 0x01)` = test button, `0x04` / `0x05` = bad CTRL (range /
+  CRC), `0x06` = no CTRL for 90 ms. Peers show their state, `fault 0x..` or `LOST`.
+- **Test button**: the blue USER button B1. One press puts the zone in
+  SYS_ERROR and sends a FAULT (motors brake, servo centers); press twice
+  quickly to recover.
+- `blink`: the lamps follow the cockpit's BLINK; `(local)` means hazards
+  generated here because the cockpit can't be heard.
+- Watchdog: 250 ms; if the board ever resets from it, the next boot prints
+  `*** last reset was the watchdog ***`.
 - `0x102` is this node's heartbeat; `peers` turn `LOST` 66 ms after a zone's
   heartbeat stops on both buses, and the state goes `SYS_ERROR` (ERR high).
 - `rx` counts every copy on that bus; `accepted` counts each (ID, seq) once.
@@ -89,4 +102,4 @@ in `src/lab3_config.h` to skip). Then, once a second, with all three nodes up:
 
 ## Test points driven now
 
-CAN_TX_A/B, CAN_RX_A/B, DEG_A/B, ERR, PWM_SET (every motor duty write), PWM_OUT (left motor PWM) and DIR_A (H-bridge IN1). RL and RR are only driven by the boot walk until BLINK is implemented.
+All of this zone's rows: CAN_TX_A/B, CAN_RX_A/B, DEG_A/B, ERR, PWM_SET (every motor duty write), PWM_OUT (left motor PWM), DIR_A (H-bridge IN1), and RL / RR (the rear blinkers).

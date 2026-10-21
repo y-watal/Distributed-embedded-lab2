@@ -4,6 +4,8 @@
 #include <zephyr/sys/printk.h>
 
 #include "app.h"
+#include "blink.h"
+#include "zone.h"
 #include "canbus.h"
 #include "ctrl.h"
 #include "hb.h"
@@ -71,11 +73,26 @@ static void report_thread(void *p1, void *p2, void *p3)
 		uint32_t ms = k_uptime_get_32();
 		struct canbus_stats *s = &canbus_stats;
 
-		printk("[%s %u.%03us] %s | peers:", NODE_NAME, ms / 1000, ms % 1000,
-		       hb_state_name(hb_zone_state()));
+		uint8_t lf = zone_local_fault();
+
+		printk("[%s %u.%03us] %s", NODE_NAME, ms / 1000, ms % 1000,
+		       zone_state_name(zone_state()));
+		if (lf) {
+			printk(" (local fault 0x%02x)", lf);
+		}
+		printk(" | peers:");
 		for (int n = 0; n < NUM_NODES; n++) {
-			if (n != NODE_SELF) {
-				printk(" N%d %s", n + 1, hb_peer_alive(n) ? "ok" : "LOST");
+			uint8_t code;
+
+			if (n == NODE_SELF) {
+				continue;
+			}
+			if (!hb_peer_alive(n)) {
+				printk(" N%d LOST", n + 1);
+			} else if (zone_peer_fault(n, &code)) {
+				printk(" N%d fault 0x%02x", n + 1, code);
+			} else {
+				printk(" N%d %s", n + 1, zone_state_name(zone_peer_state(n)));
 			}
 		}
 		printk(" | dup %ld echo %ld rxdrop %ld", (long)atomic_clear(&s->duplicates),
@@ -122,6 +139,7 @@ static void report_thread(void *p1, void *p2, void *p3)
 			       cmd.steer, cmd.throttle, cmd.brake, cmd.buttons, age);
 		}
 		printk("\n");
+		printk("  blink: %s\n", blink_describe());
 		app_report();
 	}
 }

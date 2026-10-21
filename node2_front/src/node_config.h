@@ -11,4 +11,8 @@
 /* Current sensors: {ADC1 channel, polarity, name}. Servo: PC1 = ADC1_IN11 (Lab 2). */
 #define CURRENT_CHANNELS {{11, 1, "servo"}}
 
+/* BLINK_F: this zone's blinker lamps (test points / LEDs) */
+#define BLINK_LAMP_LEFT  TP_FL
+#define BLINK_LAMP_RIGHT TP_FR
+
 #endif /* NODE_CONFIG_H */

@@ -1,9 +1,10 @@
 /*
  * N3 application: Lab 2's motor control, split into the template's two tasks.
  *
- *  DRIVE (PRIO_DRIVE) wakes on every valid CTRL, at least every
- *  ACTUATOR_POLL_MS. It decides the mode: OFF (dynamic brake, drive not
- *  allowed) unless the zone is NORMAL and CTRL is fresh; BRAKE when brake >=
+ *  DRIVE (PRIO_DRIVE) wakes on every valid CTRL, on a rejected CTRL or a test
+ *  button press, and at least every ACTUATOR_POLL_MS. It decides the mode: OFF
+ *  (dynamic brake, drive not allowed: the fail-safe state) unless the zone is
+ *  NORMAL and CTRL is fresh; BRAKE when brake >=
  *  CTRL_BRAKE_ACTIVE (brake wins over throttle, applied immediately - this is
  *  the end of the brake chain); COAST at zero throttle; otherwise PID with a
  *  target speed from the throttle.
@@ -28,6 +29,7 @@
 #include "hb.h"
 #include "lab3_config.h"
 #include "motor.h"
+#include "watchdog.h"
 
 #define DRIVE_STACK_SIZE 1024
 #define PID_STACK_SIZE   1536
@@ -165,6 +167,7 @@ static void drive_thread(void *p1, void *p2, void *p3)
 		}
 		atomic_set(&t_target, (atomic_val_t)target_mm_s);
 		k_mutex_unlock(&drive_lock);
+		watchdog_checkin(WDT_ACTUATOR);
 	}
 }
 
@@ -239,10 +242,9 @@ static void pid_thread(void *p1, void *p2, void *p3)
 
 void app_on_frame(const struct can_frame *frame, int bus)
 {
+	/* CTRL, BLINK, HB and FAULT are routed in main.c; nothing else for N3. */
+	ARG_UNUSED(frame);
 	ARG_UNUSED(bus);
-	if (frame->id == ID_CTRL) {
-		ctrl_on_frame(frame);
-	}
 }
 
 int app_init(void)

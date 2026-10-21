@@ -14,4 +14,8 @@
  */
 #define CURRENT_CHANNELS {{8, -1, "L"}, {4, 1, "R"}}
 
+/* BLINK_R: this zone's blinker lamps (test points / LEDs) */
+#define BLINK_LAMP_LEFT  TP_RL
+#define BLINK_LAMP_RIGHT TP_RR
+
 #endif /* NODE_CONFIG_H */

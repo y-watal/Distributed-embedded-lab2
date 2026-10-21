@@ -100,9 +100,10 @@ static bool peer_alive[NUM_NODES];
 static bool peer_fault[NUM_NODES];
 static uint8_t peer_fault_code[NUM_NODES];
 static uint64_t peer_fault_ns[NUM_NODES];
+static uint8_t peer_state[NUM_NODES]; /* from their heartbeats */
 static enum zone_state zone = ZONE_BOOT;
 static bool booted;
-static uint8_t local_fault = FAULT_NONE;
+static uint8_t local_fault = FAULT_NONE, last_fault = FAULT_NONE;
 static bool test_fault;        /* cockpit test button engaged */
 static uint64_t last_udp_ns;
 static bool have_udp;
@@ -462,6 +463,7 @@ static void *can_rx_thread(void *arg)
 					bool lf = f.data[1] & HB_B1_LOCAL_FAULT;
 
 					pthread_mutex_lock(&lock);
+					peer_state[sender] = f.data[1] & HB_B1_STATE_MASK;
 					if (lf) {
 						peer_fault[sender] = true;
 						peer_fault_code[sender] = f.data[3];
@@ -518,7 +520,7 @@ static void send_hb(void)
 	pthread_mutex_lock(&lock);
 	d[1] = (uint8_t)((zone & HB_B1_STATE_MASK) | (local_fault ? HB_B1_LOCAL_FAULT : 0));
 	d[2] = (uint8_t)((deg[BUS_A] ? HB_B2_A_DEGRADED : 0) | (deg[BUS_B] ? HB_B2_B_DEGRADED : 0));
-	d[3] = local_fault;
+	d[3] = local_fault ? local_fault : last_fault; /* most recent local fault */
 	pthread_mutex_unlock(&lock);
 	d[2] |= (uint8_t)((atomic_exchange(&busoff[BUS_A], false) ? HB_B2_A_BUSOFF : 0) |
 			  (atomic_exchange(&busoff[BUS_B], false) ? HB_B2_B_BUSOFF : 0));
@@ -578,7 +580,10 @@ static void monitor(uint64_t now)
 		}
 		peer_alive[n] = alive;
 		all_alive = all_alive && alive;
-		any_peer_fault = any_peer_fault || (alive && peer_fault[n]);
+		/* a zone reporting a fault, or not ready (BOOT / ISOLATED), keeps us in error */
+		any_peer_fault = any_peer_fault ||
+				 (alive && (peer_fault[n] || peer_state[n] == ZONE_BOOT ||
+					    peer_state[n] == ZONE_ISOLATED));
 	}
 
 	bool udp_ok = have_udp && now - last_udp_ns < UDP_TIMEOUT_NS;
@@ -587,6 +592,9 @@ static void monitor(uint64_t now)
 	if (lf != local_fault) {
 		if (lf != FAULT_NONE && booted) {
 			queue_fault(lf, 0);
+		}
+		if (lf != FAULT_NONE) {
+			last_fault = lf;
 		}
 		local_fault = lf;
 	}

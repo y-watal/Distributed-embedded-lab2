@@ -6,6 +6,8 @@
 #include "lab3_config.h"
 #include "node_config.h"
 #include "tp.h"
+#include "watchdog.h"
+#include "zone.h"
 
 #define HB_STACK_SIZE 1024
 
@@ -13,7 +15,6 @@ static const enum tp_id tp_deg[NUM_BUSES] = {TP_DEG_A, TP_DEG_B};
 
 static atomic_t deg[NUM_BUSES] = {ATOMIC_INIT(1), ATOMIC_INIT(1)};
 static atomic_t peer_alive[NUM_NODES];
-static atomic_t zone_state = ATOMIC_INIT(ZONE_BOOT);
 static atomic_t relay_active;
 
 K_SEM_DEFINE(hb_due, 0, 1);
@@ -31,18 +32,7 @@ static struct k_thread hb_tx_data, hb_mon_data;
 
 const char *hb_state_name(enum zone_state state)
 {
-	switch (state) {
-	case ZONE_BOOT:
-		return "BOOT";
-	case ZONE_SYS_ERROR:
-		return "SYS_ERROR";
-	case ZONE_NORMAL:
-		return "NORMAL";
-	case ZONE_ISOLATED:
-		return "ISOLATED";
-	default:
-		return "?";
-	}
+	return zone_state_name(state);
 }
 
 bool hb_bus_degraded(int bus)
@@ -57,7 +47,7 @@ bool hb_peer_alive(int node)
 
 enum zone_state hb_zone_state(void)
 {
-	return (enum zone_state)atomic_get(&zone_state);
+	return zone_state();
 }
 
 void hb_set_relay_active(bool active)
@@ -87,16 +77,19 @@ static void hb_tx_thread(void *p1, void *p2, void *p3)
 			}
 		}
 
-		p[1] = (uint8_t)hb_zone_state() & HB_B1_STATE_MASK;
+		uint8_t lf = zone_local_fault();
+
+		p[1] = (uint8_t)((zone_state() & HB_B1_STATE_MASK) | (lf ? HB_B1_LOCAL_FAULT : 0));
 		p[2] = (hb_bus_degraded(BUS_A) ? HB_B2_A_DEGRADED : 0) |
 		       (hb_bus_degraded(BUS_B) ? HB_B2_B_DEGRADED : 0) |
 		       (canbus_take_busoff(BUS_A) ? HB_B2_A_BUSOFF : 0) |
 		       (canbus_take_busoff(BUS_B) ? HB_B2_B_BUSOFF : 0) |
 		       (atomic_get(&relay_active) ? HB_B2_RELAY : 0);
-		p[3] = FAULT_NONE;
+		p[3] = zone_last_fault();
 
 		/* Heartbeats go out on degraded buses too: that's how the link recovers. */
 		canbus_send(ID_HB(NODE_SELF), p, true);
+		watchdog_checkin(WDT_HB_TX);
 	}
 }
 
@@ -110,7 +103,6 @@ static bool heard_within(int bus, int node, uint32_t now, uint32_t timeout_ms)
 static void hb_mon_thread(void *p1, void *p2, void *p3)
 {
 	int64_t next = k_uptime_get();
-	bool booted = false;
 
 	ARG_UNUSED(p1);
 	ARG_UNUSED(p2);
@@ -118,7 +110,6 @@ static void hb_mon_thread(void *p1, void *p2, void *p3)
 
 	for (;;) {
 		uint32_t now = k_uptime_get_32();
-		bool all_alive = true;
 
 		/* Degraded: no other node heard on this bus for DEG_TIMEOUT_MS. */
 		for (int bus = 0; bus < NUM_BUSES; bus++) {
@@ -142,31 +133,17 @@ static void hb_mon_thread(void *p1, void *p2, void *p3)
 			}
 		}
 
-		/* Zone failed: heartbeat missing on both buses for FAIL_TIMEOUT_MS. */
+		/* Zone lost: heartbeat missing on both buses for FAIL_TIMEOUT_MS. */
 		for (int node = 0; node < NUM_NODES; node++) {
-			if (node == NODE_SELF) {
-				continue;
+			if (node != NODE_SELF) {
+				atomic_set(&peer_alive[node],
+					   heard_within(BUS_A, node, now, FAIL_TIMEOUT_MS) ||
+						   heard_within(BUS_B, node, now, FAIL_TIMEOUT_MS));
 			}
-			bool alive = heard_within(BUS_A, node, now, FAIL_TIMEOUT_MS) ||
-				     heard_within(BUS_B, node, now, FAIL_TIMEOUT_MS);
-
-			atomic_set(&peer_alive[node], alive);
-			all_alive = all_alive && alive;
 		}
 
-		/*
-		 * Placeholder zone state until the full error state machine (stage 4:
-		 * valid CTRL, test button, FAULT): BOOT until every other zone has been
-		 * heard, then SYS_ERROR while any of them is failed, NORMAL otherwise.
-		 */
-		enum zone_state st;
-
-		if (!booted && all_alive) {
-			booted = true;
-		}
-		st = !booted ? ZONE_BOOT : (all_alive ? ZONE_NORMAL : ZONE_SYS_ERROR);
-		atomic_set(&zone_state, st);
-		tp_set(TP_ERR, st != ZONE_NORMAL);
+		zone_update();
+		watchdog_service();
 
 		next += MONITOR_PERIOD_MS;
 		k_sleep(K_TIMEOUT_ABS_MS(next));

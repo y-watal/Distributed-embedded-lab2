@@ -58,12 +58,13 @@ At boot every test point goes high for 300 ms in turn (set `TP_WALK_MS` to 0
 in `src/lab3_config.h` to skip). Then, once a second, with all three nodes up:
 
 ```
-[N2 12.000s] NORMAL | peers: N1 ok N3 ok | dup 100 echo 0 | relay 100 skip 0 drop 0
+[N2 12.000s] NORMAL | peers: N1 NORMAL N3 NORMAL | dup 100 echo 0 | relay 100 skip 0 drop 0
   A: error-active tec=0 rec=0 DEG 0 | tx ok=50 err=0 full=0 skip=0 | rx: 0x100 x50 0x102 x50
   B: error-active tec=0 rec=0 DEG 0 | tx ok=150 err=0 full=0 skip=0 | rx: 0x100 x50 0x102 x50
   accepted: 0x100 x50 0x102 x50
   ctrl: ok 50 malformed 0 range 0 | last: steer 1200 throttle 0 brake 0 buttons 0x0, 4 ms ago
-  steer: following angle 100 deg | servo 85 mA
+  blink: off, lamps off
+  steer: following angle 100 deg | servo 85 mA | FORCE 37
 ```
 
 (Example assumes N2 usually gets the bus A copy first, so its forwards land on bus B; the split between buses can differ, the `accepted` line can't.)
@@ -71,6 +72,18 @@ in `src/lab3_config.h` to skip). Then, once a second, with all three nodes up:
 - `steer`: `following` while NORMAL with fresh CTRL, else `centered` (90 deg).
 - The `ctrl` line counts CTRL frames accepted / rejected (bad CRC or reserved byte
   = malformed, steering or button bits out of range = range) and shows the last one.
+- State: BOOT until both other zones are heard and CTRL arrives; NORMAL;
+  SYS_ERROR (ERR high) with a local fault, a lost zone or a faulted / not-ready
+  zone; ISOLATED (fail-safe, local hazards) when no other zone is heard.
+  `(local fault 0x01)` = test button, `0x04` / `0x05` = bad CTRL (range /
+  CRC), `0x06` = no CTRL for 90 ms. Peers show their state, `fault 0x..` or `LOST`.
+- **Test button**: the blue USER button B1. One press puts the zone in
+  SYS_ERROR and sends a FAULT (motors brake, servo centers); press twice
+  quickly to recover.
+- `blink`: the lamps follow the cockpit's BLINK; `(local)` means hazards
+  generated here because the cockpit can't be heard.
+- Watchdog: 250 ms; if the board ever resets from it, the next boot prints
+  `*** last reset was the watchdog ***`.
 - `0x101` is this node's heartbeat; `peers` turn `LOST` 66 ms after a zone's
   heartbeat stops on both buses, and the state goes `SYS_ERROR` (ERR high).
 - `rx` counts every copy on that bus; `accepted` counts each (ID, seq) once.
@@ -86,4 +99,4 @@ in `src/lab3_config.h` to skip). Then, once a second, with all three nodes up:
 
 ## Test points driven now
 
-CAN_TX_A/B (every queued frame, including relayed ones), CAN_RX_A/B (every received copy), DEG_A/B, ERR, RELAY_TX, and SRV (the servo PWM). FL and FR are only driven by the boot walk until BLINK is implemented.
+All of this zone's rows: CAN_TX_A/B (every queued frame, including relayed ones), CAN_RX_A/B (every received copy), DEG_A/B, ERR, RELAY_TX, SRV (the servo PWM), and FL / FR (the front blinkers).

@@ -40,6 +40,10 @@
 };
 
 /* ---- Board defaults that sit on pins this node uses ---- */
+/* ---- Independent watchdog (src/watchdog.c); the window watchdog stays off ---- */
+&iwdg { status = "okay"; };
+&wwdg { status = "disabled"; };
+
 &usart1 { status = "disabled"; };	/* PB6/PB7: PB6 is CAN A chip select */
 &i2c1 { status = "disabled"; };		/* PB8/PB9: CAN_TX_A/B test points */
 &i2c3 { status = "disabled"; };		/* PA8/PC9: PA8 is the left encoder */

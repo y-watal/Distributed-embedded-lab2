@@ -1,7 +1,8 @@
 /*
  * HB_TX: this node's heartbeat every HB_PERIOD_MS on both buses.
  * HB_MON: every MONITOR_PERIOD_MS, per-bus degraded state (DEG LEDs, R4.7) and
- * per-zone failure (R4.5) from the heartbeat ages kept by canbus.
+ * per-zone failure (R4.5) from the heartbeat ages kept by canbus; then runs the
+ * zone state machine (zone.c) and services the watchdog.
  */
 #ifndef HB_H
 #define HB_H
@@ -14,7 +15,7 @@ int hb_init(void);
 
 bool hb_bus_degraded(int bus);
 bool hb_peer_alive(int node);
-enum zone_state hb_zone_state(void);
+enum zone_state hb_zone_state(void); /* = zone_state() */
 const char *hb_state_name(enum zone_state state);
 
 /* Set by the relay so the heartbeat carries RELAY_ACTIVE. */

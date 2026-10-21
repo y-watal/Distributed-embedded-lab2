@@ -112,8 +112,11 @@ Lower number = higher priority (`lab3_config.h`).
 | steer | N2 | 5 | On every valid CTRL (and every 5 ms): servo follows the wheel while NORMAL and CTRL fresh, else centers |
 | drive | N3 | 5 | On every valid CTRL (and every 5 ms): brake / coast / PID target; dynamic brake unless NORMAL and CTRL fresh |
 | pid | N3 | 6 | Every 10 ms: encoders -> Lab 2 feedforward + PI -> motor duty, while the mode is PID |
+| blink | both | 5 | BLINK_F / BLINK_R: lamps follow the cockpit's BLINK as soon as it arrives; local hazards if the cockpit can't be heard or the zone is ISOLATED |
+| test_btn | both | 5 | USER button B1 (ISR gives a semaphore, 50 ms debounce lockout): single press = local fault, double press = recover |
 | hb_tx | both | 7 | HB every 20 ms (k_timer, no drift) on both buses |
-| hb_mon | both | 8 | Every 5 ms: DEG_A/B, zone failure, zone state, ERR |
+| hb_mon | both | 8 | Every 5 ms: DEG_A/B, zone lost, then the zone state machine (zone.c) and the watchdog check |
+| force | N2 | 9 | FORCE every 50 ms (dummy counter) |
 | current | both | 10 | Current sensors every 20 ms (N2: servo, N3: both motors) |
 | report | both | 12 | Console summary once a second |
 
@@ -158,31 +161,62 @@ degraded so queued stale frames are dropped.
 
 ## Zone state and fault protocol
 
-The cockpit implements this now; the Nucleos' error state machine (stage 4)
-should mirror it so all three agree.
+Implemented on all three nodes: `node1_pi/cockpit.c` and `zone.c` on the Nucleos.
 
-- **Local fault**: something wrong in this zone (cockpit: test button,
-  UDP_TIMEOUT; STM32s: test button, CTRL range / malformed / timeout, motor).
-  On entering one, the zone sends FAULT_Nx (code, detail) once and sets
-  LOCAL_FAULT and the code in every heartbeat while it lasts.
-- **Zone state**: BOOT until every other zone's heartbeat has been heard (and,
-  on the cockpit, wheel data has arrived); after that SYS_ERROR while the zone
-  has a local fault, any other zone is lost (66 ms on both buses) or any
-  other zone reports a fault; NORMAL otherwise. Recovery is automatic, no reset.
+- **Local fault**: something wrong in this zone. Cockpit: test button (wheel
+  button 10), UDP_TIMEOUT (no wheel packet for 90 ms). Nucleos, highest first:
+  TEST_BUTTON (B1), CTRL_RANGE / CTRL_MALFORMED (held 1 s, then cleared by the
+  next valid CTRL), CTRL_TIMEOUT (no valid CTRL for 90 ms after boot). On
+  entering one, the zone sends FAULT_Nx (code, detail) once; while it lasts
+  every heartbeat carries LOCAL_FAULT, and byte 3 carries the most recent
+  local fault code.
+- **Zone state**:
+  - BOOT until every other zone's heartbeat has been heard and (cockpit) wheel
+    data / (Nucleos) a valid CTRL has arrived.
+  - ISOLATED (Nucleos, after boot) when no other zone is heard on either bus:
+    the fail-safe state - N3 brakes, N2 centers the servo, both flash hazards.
+  - SYS_ERROR while the zone has a local fault, another zone is lost (66 ms on
+    both buses), another zone reports a fault, or another zone's heartbeat says
+    BOOT or ISOLATED (not ready).
+  - NORMAL otherwise. Recovery is automatic, no reset. Another zone being in
+    SYS_ERROR doesn't count, so zones can't hold each other in error.
 - **A FAULT_Nx from another zone** marks it faulted at once (the fast path,
   checkoff 9's 100 ms). It is cleared by that zone's next heartbeat with
   LOCAL_FAULT = 0 that arrives more than 25 ms after the FAULT (an older
   heartbeat can overtake a FAULT, which has the higher priority).
 - **PEER_LOST is informational**: each zone detects lost peers itself from
   heartbeats, so receiving PEER_LOST doesn't fault the sender.
-- **Hazards**: the cockpit sends BLINK = hazard whenever it isn't NORMAL; an
-  STM32 that can't hear the cockpit has to flash hazards on its own.
-- Test buttons: single press = local fault, double press within 350 ms = clear.
+- **Actuators** run only in NORMAL with fresh CTRL; in every other state N3
+  dynamic-brakes and N2 centers. A test-button press or a rejected CTRL
+  re-evaluates the state and wakes the actuator task immediately (R2.5 local
+  fail within 10 ms).
+- **Hazards**: the cockpit sends BLINK = hazard whenever it isn't NORMAL, and
+  the STM32s follow it (front/rear in sync). An STM32 flashes hazards on its
+  own when it's ISOLATED, can't hear the cockpit, or gets no BLINK for 1.1 s.
+- **Watchdog**: each STM32's IWDG (250 ms) is fed every 100 ms only if HB_TX
+  and the actuator task both checked in; a watchdog reset is reported at the
+  next boot as WATCHDOG_RESET in heartbeat byte 3.
+
+**Checkoff walk-through**
+
+| Step | What happens |
+|---|---|
+| 1 cold start, proxy stopped | Cockpit BOOT + UDP_TIMEOUT, sends hazard BLINK; STM32s BOOT (no CTRL), ERR high everywhere. Proxy starts: cockpit boots, CTRL flows, STM32s boot, all NORMAL within ~40 ms |
+| 5 one node off one bus | That node's DEG on within 49 ms; state unchanged everywhere |
+| 7 the hop | N2 relays; N3 keeps CTRL, BLINK and HB_N1; all stay NORMAL |
+| 8 one STM32 isolated | It goes ISOLATED (fail-safe, local hazards) after 66 ms; the other two SYS_ERROR within 71 ms. Restore: NORMAL again within ~50 ms, no reset |
+| 9 test button on N2 | N2 SYS_ERROR at once, FAULT_N2; N3 brakes within ~5 ms; cockpit hazards within ~25 ms; ERR high on all three. Double press: NORMAL again |
+| 10 bad input | Both STM32s reject the CTRL, send FAULT_N2 / FAULT_N3, stay in error 1 s, recover on the next valid CTRL |
 
 ## Status
 
-Done: CAN layer, heartbeats, HB_MON, DEG LEDs, zone failure, N2 relay, test
-points, CTRL checking, Lab 2 steering (N2) and drivetrain with PID (N3),
-current sensors, and the complete cockpit program (N1). The zone state is a placeholder (BOOT until both other
-zones are heard, SYS_ERROR while one is failed); the full Lab 1 error state
-machine (valid CTRL, test button, FAULT, isolated/fail-safe) is stage 4.
+Software complete for the checkoff sequence: CAN layer, heartbeats, HB_MON,
+DEG LEDs, N2 relay, test points, CTRL checking, the zone state machine and
+fault protocol on all three nodes, test buttons, blinkers (cockpit as master),
+FORCE, the watchdog, the Lab 2 steering (N2) and drivetrain with PID (N3),
+current sensors, and the cockpit program (N1). Not run on hardware yet.
+
+Left for the report: WCET and latency measurements with the test points,
+the response-time tables, and the fault-injection matrix with measured
+recovery times. Current readings are reported but not acted on (no
+MOTOR_OVERLOAD fault).

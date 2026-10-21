@@ -1,6 +1,7 @@
 #include "ctrl.h"
 
 #include "lab3_config.h"
+#include "zone.h"
 
 struct ctrl_stats ctrl_stats;
 
@@ -17,10 +18,12 @@ void ctrl_on_frame(const struct can_frame *frame)
 	enum fault_code fault = ctrl_check(frame->data, &cmd);
 
 	if (fault != FAULT_NONE) {
-		/* Stage 4: error state + FAULT_Nx. For now, count and keep the old command. */
+		/* Keep the old command; the zone goes to error and sends FAULT_Nx. */
 		atomic_inc(fault == FAULT_CTRL_MALFORMED ? &ctrl_stats.malformed
 							 : &ctrl_stats.out_of_range);
 		atomic_set(&ctrl_stats.last_fault, fault);
+		zone_ctrl_rejected(fault);
+		k_sem_give(&ctrl_new); /* wake the actuator task: go safe now */
 		return;
 	}
 
@@ -31,6 +34,12 @@ void ctrl_on_frame(const struct can_frame *frame)
 	k_spin_unlock(&lock, key);
 
 	atomic_inc(&ctrl_stats.ok);
+	zone_ctrl_accepted();
+	k_sem_give(&ctrl_new);
+}
+
+void ctrl_kick(void)
+{
 	k_sem_give(&ctrl_new);
 }
 

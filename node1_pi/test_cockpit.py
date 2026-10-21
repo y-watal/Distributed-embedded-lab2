@@ -58,6 +58,7 @@ class Sim:
         self.nodes_on = {"A": {1, 2}, "B": {1, 2}}   # which simulated nodes are on each bus
         self.relay = True
         self.n3_fault = False
+        self.n3_state = 2
         self.wheel = None         # (steer, throttle, brake, buttons) or None = proxy stopped
         self.next_hb = self.next_udp = self.next_force = time.monotonic()
         self.counter = 0
@@ -88,7 +89,7 @@ class Sim:
             if now >= self.next_hb:
                 self.next_hb += 0.020
                 self.emit(1, 0x101, [0, 2, 0x10, 0, 0, 0, 0, 0])
-                self.emit(2, 0x102, [0, 2 | (0x10 if self.n3_fault else 0), 0, 1 if self.n3_fault else 0, 0, 0, 0, 0])
+                self.emit(2, 0x102, [0, self.n3_state | (0x10 if self.n3_fault else 0), 0, 1 if self.n3_fault else 0, 0, 0, 0, 0])
             if now >= self.next_force:
                 self.next_force += 0.050
                 self.emit(1, 0x300, [0, (self.counter * 3) & 0x7F, 0, 0, 0, 0, 0, 0])
@@ -155,7 +156,7 @@ def main():
         expect = cat.ctrl_payload(d[0] & 0x0F, *cat.ctrl_from_lab2(1000, 16384, 0, 0, 0, 0))
         check("CTRL bytes and CRC match catalog.py", d == expect, d.hex())
         st = hb_state(sim.since(t + 0.3, 0x100, "A"))
-        check("NORMAL once both zones and the wheel are present", st and st[-1] == (2, False, 0), str(st[-1:]))
+        check("NORMAL once both zones and the wheel are present", st and st[-1][:2] == (2, False), str(st[-1:]))
         bl = sim.since(t + 0.3, 0x200, "A")
         check("BLINK off when NORMAL", bl and (bl[-1][3][1] & 3) == 0)
         seqs = [f[3][0] & 0x0F for f in ca]
@@ -204,6 +205,14 @@ def main():
         st = hb_state(sim.since(t + 0.05, 0x100, "A"))
         check("N3 fault cleared -> NORMAL again", st and st[-1][0] == 2, str(st[-1:]))
 
+        # 6b. N3 reboots (heartbeat says BOOT): the cockpit stays in error until N3 is ready.
+        sim.n3_state = 0; t = time.monotonic(); sim.run(0.1)
+        st = hb_state(sim.since(t + 0.03, 0x100, "A"))
+        check("N3 heartbeat in BOOT -> cockpit SYS_ERROR", st and st[-1][0] == 1, str(st[-1:]))
+        sim.n3_state = 2; t = time.monotonic(); sim.run(0.1)
+        st = hb_state(sim.since(t + 0.03, 0x100, "A"))
+        check("N3 ready again -> NORMAL", st and st[-1][0] == 2, str(st[-1:]))
+
         # 7. FORCE from N2 is forwarded to the proxy over UDP.
         n = len(sim.forces); sim.run(0.3)
         check("FORCE forwarded to the proxy", len(sim.forces) - n >= 4, f"{len(sim.forces) - n} in 0.3 s")
@@ -230,7 +239,8 @@ def main():
             sim.wheel = (0, 0, 0, [10]); sim.run(0.06); sim.wheel = (0, 0, 0, []); sim.run(0.06)
         t = time.monotonic(); sim.run(0.1)
         st = hb_state(sim.since(t, 0x100, "A"))
-        check("double press -> recovered", st and st[-1] == (2, False, 0), str(st[-1:]))
+        check("double press -> recovered, byte 3 keeps the last fault",
+              st and st[-1] == (2, False, 1), str(st[-1:]))
 
         # 10. Proxy stops: UDP timeout after 90 ms -> FAULT_N1 UDP_TIMEOUT.
         sim.wheel = None; t = time.monotonic(); sim.run(0.3)

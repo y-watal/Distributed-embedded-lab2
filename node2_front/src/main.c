@@ -6,12 +6,16 @@
  * Threads (priority, lower = higher; all values in lab3_config.h):
  *   MCP2515 driver x2 (2)  SPI frame reads, toggles CAN_RX_A/B via canbus rx_cb
  *   relay      (3, N2)     forwards first copies to the other bus, RELAY_TX
- *   dispatch   (4)         dedup by (ID, seq), heartbeat ages, CTRL check
+ *   dispatch   (4)         dedup by (ID, seq), heartbeat ages, CTRL check,
+ *                          HB/FAULT -> zone state, BLINK -> blink
  *   steer      (5, N2)     CTRL -> servo angle
  *   drive      (5, N3)     CTRL -> brake / coast / PID target
+ *   blink      (5)         this zone's two blinker lamps
+ *   test_btn   (5)         USER button B1 -> local fault / recover
  *   pid        (6, N3)     encoders -> motor duty every 10 ms
  *   hb_tx      (7)         HB every 20 ms on both buses
- *   hb_mon     (8)         every 5 ms: DEG_A/B, zone failure, ERR
+ *   hb_mon     (8)         every 5 ms: DEG_A/B, zone lost, zone state, ERR, watchdog
+ *   force      (9, N2)     FORCE every 50 ms
  *   current    (10)        current sensors every 20 ms
  *   report     (12)        console summary once a second
  *
@@ -21,13 +25,31 @@
 #include <zephyr/sys/printk.h>
 
 #include "app.h"
+#include "blink.h"
+#include "button.h"
 #include "canbus.h"
+#include "ctrl.h"
 #include "hb.h"
 #include "lab3_config.h"
 #include "node_config.h"
 #include "relay.h"
 #include "report.h"
 #include "tp.h"
+#include "watchdog.h"
+#include "zone.h"
+
+/* Dispatch thread: route the first copy of each frame. */
+static void on_frame(const struct can_frame *frame, int bus)
+{
+	if (frame->id == ID_CTRL) {
+		ctrl_on_frame(frame);
+	} else if (frame->id == ID_BLINK) {
+		blink_on_frame(frame);
+	} else if (catalog_is_hb(frame->id) || (frame->id >= ID_FAULT(0) && frame->id < ID_FAULT(NUM_NODES))) {
+		zone_on_frame(frame);
+	}
+	app_on_frame(frame, bus);
+}
 
 int main(void)
 {
@@ -43,7 +65,7 @@ int main(void)
 	tp_set(TP_DEG_A, 1);
 	tp_set(TP_DEG_B, 1);
 
-	canbus_set_handler(app_on_frame);
+	canbus_set_handler(on_frame);
 	if (canbus_init() < 0) {
 		printk("no CAN controller came up\n");
 	}
@@ -56,6 +78,16 @@ int main(void)
 
 	if (ret < 0) {
 		printk("app_init failed (%d): actuators stay in their safe state\n", ret);
+	}
+	blink_init();
+	if (button_init() < 0) {
+		printk("test button init failed\n");
+	}
+	/* Last, and only if the actuator task is running: it has to check in. */
+	if (ret == 0) {
+		watchdog_init();
+	} else {
+		printk("watchdog not started (no actuator task to supervise)\n");
 	}
 	return 0;
 }

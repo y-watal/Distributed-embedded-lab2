@@ -18,14 +18,16 @@ and two STM32 Nucleo-F401RE zone controllers.
 
 ## Current stage
 
-Done on the Nucleos: the dual-CAN layer (heartbeats every 20 ms, dedup by
-(ID, seq), DEG LEDs after 44 ms, zone failure after 66 ms), N2's always-on
-relay, CTRL checking (CRC-8, ranges), and the Lab 2 hardware: steering servo
-on N2, H-bridge + encoders + PID on N3, current sensors on both. Decisions and
-thresholds: `docs/lab3_design.md`; wiring: `docs/lab3_pin_map.md`.
+All the software for the checkoff sequence is written (not yet run on the
+hardware):
 
-Done on the Pi: the complete cockpit program (`node1_pi/cockpit.c`), with a
-hardware-free test (`node1_pi/test_cockpit.py`).
+- **Nucleos**: dual-CAN layer (heartbeats every 20 ms, dedup by (ID, seq), DEG
+  LEDs after 44 ms, zone lost after 66 ms), N2's always-on relay, CTRL checking
+  (CRC-8, ranges), the zone state machine and fault protocol, test button B1,
+  blinkers following the cockpit, FORCE (N2), the watchdog, and the Lab 2
+  hardware: steering servo (N2), H-bridge + encoders + PID (N3), current sensors.
+- **Pi**: the cockpit program (`node1_pi/cockpit.c`) and its hardware-free
+  test (`node1_pi/test_cockpit.py`).
 
-Next on the Nucleos: blinkers from BLINK, the error state machine with test
-buttons and FAULT messages (protocol in `docs/lab3_design.md`), the watchdog.
+Decisions, thresholds, the fault protocol and a checkoff walk-through:
+`docs/lab3_design.md`. Wiring: `docs/lab3_pin_map.md`.

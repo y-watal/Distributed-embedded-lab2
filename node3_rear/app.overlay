@@ -1,8 +1,60 @@
 /*
- * Two XIAO CAN modules (MCP2515 + SN65HVD230) on SPI1, Arduino header.
+ * N3 (rear): two MCP2515 CAN modules on SPI1 and the Lab 3 test points.
+ * Full pin and breadboard-row map: docs/lab3_pin_map.md
+ */
+#include <zephyr/dt-bindings/gpio/gpio.h>
+#include <zephyr/dt-bindings/pwm/pwm.h>
+
+/ {
+	aliases {
+		can-a = &can_a;
+		can-b = &can_b;
+	};
+
+	/* Test points (src/tp.c). Rows 1-2 of the test-point board are GND. */
+	zephyr,user {
+		can-rx-a-gpios = <&gpioa 0 GPIO_ACTIVE_HIGH>;	/* row 3:  CAN_RX_A, A0 / PA0 */
+		can-rx-b-gpios = <&gpioa 1 GPIO_ACTIVE_HIGH>;	/* row 4:  CAN_RX_B, A1 / PA1 */
+		can-tx-a-gpios = <&gpioa 4 GPIO_ACTIVE_HIGH>;	/* row 5:  CAN_TX_A, A2 / PA4 */
+		can-tx-b-gpios = <&gpiob 0 GPIO_ACTIVE_HIGH>;	/* row 6:  CAN_TX_B, A3 / PB0 */
+		deg-a-gpios    = <&gpioc 1 GPIO_ACTIVE_HIGH>;	/* row 7:  DEG_A,    A4 / PC1, LED */
+		deg-b-gpios    = <&gpioc 0 GPIO_ACTIVE_HIGH>;	/* row 8:  DEG_B,    A5 / PC0, LED */
+		pwm-set-gpios  = <&gpiob 10 GPIO_ACTIVE_HIGH>;	/* row 9:  PWM_SET,  D6 / PB10 */
+		/* row 10: PWM_OUT = PWM output, D5 / PB4 (see pwms) */
+		dir-a-gpios    = <&gpioa 8 GPIO_ACTIVE_HIGH>;	/* row 11: DIR_A,    D7 / PA8 */
+		rl-gpios       = <&gpioa 9 GPIO_ACTIVE_HIGH>;	/* row 12: RL,       D8 / PA9,  LED */
+		rr-gpios       = <&gpiob 9 GPIO_ACTIVE_HIGH>;	/* row 13: RR,       D14 / PB9, LED */
+		err-gpios      = <&gpiob 3 GPIO_ACTIVE_HIGH>;	/* row 14: ERR,      D3 / PB3 (added) */
+		/* PWM_OUT: 10 kHz motor PWM, as in Lab 2 */
+		pwms = <&pwm3 1 PWM_USEC(100) PWM_POLARITY_NORMAL>;
+	};
+};
+
+/* ---- Board defaults that sit on pins this lab uses ---- */
+&usart1 { status = "disabled"; };	/* PB6/PB7: PB6 is CAN A chip select */
+&i2c1 { status = "disabled"; };		/* PB8/PB9 */
+&i2c3 { status = "disabled"; };		/* PA8/PC9: PA8 is a test point */
+&adc1 { status = "disabled"; };		/* PA0: test point */
+&pwm2 { status = "disabled"; };		/* PWM LED on PA5 = SPI1 SCK */
+&timers2 { status = "disabled"; };
+
+/* ---- PWM output on D5 / PB4 (TIM3_CH1), 1 MHz timer tick ---- */
+&timers3 {
+	status = "okay";
+	st,prescaler = <83>;
+
+	pwm3: pwm {
+		status = "okay";
+		pinctrl-0 = <&tim3_ch1_pb4>;
+		pinctrl-names = "default";
+	};
+};
+
+/*
+ * ---- Two XIAO CAN modules (MCP2515 + SN65HVD230) on SPI1 ----
  *
  *   Module   Function   Nucleo
- *   D8       SCK        D13 / PA5   (shared; PA5 is also the user LED LD2)
+ *   D8       SCK        D13 / PA5   (shared)
  *   D10      MOSI       D11 / PA7   (shared)
  *   D9       MISO       D12 / PA6   (shared)
  *   D7       CS         CAN A: D10 / PB6    CAN B: D9 / PC7
@@ -10,15 +62,6 @@
  *
  * osc-freq must match the crystal printed on the module's metal can.
  */
-#include <zephyr/dt-bindings/gpio/gpio.h>
-
-/ {
-	aliases {
-		can-a = &can_a;
-		can-b = &can_b;
-	};
-};
-
 &spi1 {
 	status = "okay";
 	cs-gpios = <&gpiob 6 GPIO_ACTIVE_LOW>,	/* reg 0: CAN A */

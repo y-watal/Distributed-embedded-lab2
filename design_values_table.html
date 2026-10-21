@@ -1,0 +1,82 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Team Defined Values</title>
+<style>
+  body { background: #fff; color: #000; font-family: Arial, sans-serif; font-size: 11pt; margin: 24px; }
+  h2, h3 { color: #000; }
+  table { border-collapse: collapse; width: 100%; margin-bottom: 24px; }
+  th, td { border: 1px solid #000; padding: 4px 6px; text-align: left; vertical-align: top; color: #000; }
+  th { font-weight: bold; }
+</style>
+</head>
+<body>
+
+<h2>Team Defined Values</h2>
+
+<h3>Drivetrain</h3>
+<table>
+<tr><th>Symbol</th><th>Proposed Value</th><th>Units</th><th>Rationale</th></tr>
+<tr><td>THR_MIN</td><td>300</td><td>raw counts (0–32767)</td><td>Ignores very small throttle inputs near zero so pedal noise does not command the motors</td></tr>
+<tr><td>BRK_MIN</td><td>500</td><td>raw counts (0–32767)</td><td>Brake input at or above this value fully applies the brake. Braking is on/off, not proportional</td></tr>
+<tr><td>VALID_THR_RANGE</td><td>0–32767</td><td>raw counts</td><td>Valid throttle range. Anything outside it triggers a BAD_RANGE fault</td></tr>
+<tr><td>VALID_BRK_RANGE</td><td>0–32767</td><td>raw counts</td><td>Valid brake range. Anything outside it triggers a BAD_RANGE fault</td></tr>
+<tr><td>BRAKE_PRIORITY</td><td>Brake overrides throttle</td><td>—</td><td>If the brake is at or above BRK_MIN, the PID is reset and the H-bridge short-brakes, whatever the throttle is</td></tr>
+<tr><td>V_MAX</td><td>650 (≈2.76 rev/s)</td><td>mm/s</td><td>Target wheel speed at full throttle, set to the speed measured at about 70% duty</td></tr>
+<tr><td>Throttle map</td><td>v = ((thr − THR_MIN) / (32767 − THR_MIN)) × V_MAX; v = 0 if thr ≤ THR_MIN</td><td>—</td><td>Monotonic map that starts from zero at the edge of the deadband, so there is no jump in speed</td></tr>
+<tr><td>ENC_COUNTS_PER_REV</td><td>1316</td><td>encoder counts / wheel rev</td><td>Quadrature counts per wheel revolution. Converts encoder counts to wheel speed</td></tr>
+<tr><td>WHEEL_CIRC</td><td>235.6</td><td>mm</td><td>Converts wheel revolutions to linear speed</td></tr>
+<tr><td>CTRL_PERIOD</td><td>20</td><td>ms</td><td>Speed PID sample period</td></tr>
+<tr><td>K_P / K_I / K_D</td><td>1.0 / 2.0 / 0.0</td><td>permille duty per mm/s (K_I per mm/s·s)</td><td>PI speed controller gains per wheel. Derivative is unused</td></tr>
+<tr><td>FF_DUTY</td><td>55% → 70%</td><td>duty</td><td>Linear feedforward duty from the smallest target speed (55%) up to V_MAX (70%). The PID corrects around it</td></tr>
+<tr><td>I_LIMIT</td><td>±40%</td><td>duty</td><td>Integral clamp with anti-windup</td></tr>
+<tr><td>DUTY_MIN</td><td>55%</td><td>duty</td><td>Lowest duty for a non-zero target (the feedforward floor). If throttle ≤ THR_MIN the motors coast at 0%</td></tr>
+<tr><td>DUTY_MAX</td><td>100%</td><td>duty</td><td>Full throttle sits near 70%, which leaves 30% for the PID to recover under load</td></tr>
+<tr><td>PWM_FREQ</td><td>10</td><td>kHz</td><td>Frequency of the motor enable PWM</td></tr>
+<tr><td>DUTY_STEP</td><td>+5% every 20 ms</td><td>duty cycle increase</td><td>Not implemented in lab 2. Load recovery came from the PI integral</td></tr>
+<tr><td>I_OVERLOAD_THRESH</td><td>TBD</td><td>A</td><td>Current threshold above which the motor is considered overloaded</td></tr>
+<tr><td>I_OPEN_THRESH</td><td>TBD</td><td>A</td><td>Current threshold below which a commanded motor is considered disconnected</td></tr>
+</table>
+
+<h3>Steering and force feedback</h3>
+<table>
+<tr><th>Symbol</th><th>Proposed Value</th><th>Units</th><th>Rationale</th></tr>
+<tr><td>STEER_RANGE</td><td>−32767 to +32766</td><td>raw counts</td><td>Valid steering input range. Anything outside it triggers a BAD_RANGE fault</td></tr>
+<tr><td>STEER_SAT</td><td>±10000</td><td>raw counts</td><td>Steering input that gives full servo travel. Inputs beyond it are clamped, not treated as errors</td></tr>
+<tr><td>SERVO_MIN/MAX</td><td>500 / 2500</td><td>µs pulse</td><td>Servo command range, 0–180° at the servo</td></tr>
+<tr><td>SERVO_CENTER</td><td>1500</td><td>µs pulse</td><td>Straight ahead. Commanded at startup and whenever the car isn't in NORMAL</td></tr>
+<tr><td>SERVO_PERIOD</td><td>20 (50 Hz)</td><td>ms</td><td>Servo PWM frame period</td></tr>
+<tr><td>ANGLE_MAX</td><td>±50</td><td>degrees at the wheels</td><td>The servo is commanded ±90°. The wheel angle still has to be measured</td></tr>
+<tr><td>Steering Map</td><td>pulse = 1500 + steer / 10, after clamping steer to ±STEER_SAT</td><td>µs</td><td>Linear map from ±10000 to 500–2500 µs</td></tr>
+<tr><td>STEER_PERIOD</td><td>20</td><td>ms</td><td>Steering task update period. The servo is only written when the angle changes</td></tr>
+<tr><td>I_FS</td><td>TBD</td><td>A</td><td>Steering actuator current at maximum force feedback. Set after hardware testing</td></tr>
+<tr><td>Force Map</td><td>Linear from −I_FS to +I_FS into −100 to +100</td><td>—</td><td>Converts measured steering load into the signed force value sent back to the steering wheel</td></tr>
+<tr><td>FORCE_DB</td><td>5</td><td>force counts</td><td>Ignores very small force values near zero so measurement noise does not create steering wheel feedback</td></tr>
+</table>
+
+<h3>Blinkers</h3>
+<table>
+<tr><th>Symbol</th><th>Proposed Value</th><th>Units</th><th>Rationale</th></tr>
+<tr><td>BLINKER_ON</td><td>±5000</td><td>raw steering counts</td><td>Steering past this value counts as a deliberate turn and allows the blinker to cancel later</td></tr>
+<tr><td>BLINKER_OFF</td><td>±4000</td><td>raw steering counts</td><td>The wheel must return inside this value before the active blinker cancels</td></tr>
+<tr><td>LEFT_BLINKER_VALID</td><td>0 = Off, 128 = Pressed</td><td>raw button value</td><td>Any other value triggers a BAD_RANGE fault</td></tr>
+<tr><td>RIGHT_BLINKER_VALID</td><td>0 = Off, 128 = Pressed</td><td>raw button value</td><td>Any other value triggers a BAD_RANGE fault</td></tr>
+<tr><td>BLINKER_SELECT</td><td>Rising edge toggles</td><td>—</td><td>Pressing the active side again turns it off. Pressing the other side switches to it</td></tr>
+<tr><td>TURN_BLINK_RATE</td><td>1</td><td>Hz</td><td>500 ms on, 500 ms off</td></tr>
+<tr><td>HAZARD_BLINK_RATE</td><td>2</td><td>Hz</td><td>250 ms on, 250 ms off. Used in ERROR and SELF_TEST</td></tr>
+</table>
+
+<h3>Safety</h3>
+<table>
+<tr><th>Symbol</th><th>Proposed Value</th><th>Units</th><th>Rationale</th></tr>
+<tr><td>CMD_TIMEOUT</td><td>90</td><td>ms</td><td>No valid command for this long puts the car in ERROR (brake and hazards). Leaves margin for the 100 ms fault-response requirement</td></tr>
+<tr><td>CMD_KEEPALIVE</td><td>50 (minimum spacing 10)</td><td>ms</td><td>Unchanged state is resent at this rate, and changes are sent at most every 10 ms</td></tr>
+<tr><td>FAULT_RECOVERY</td><td>Next valid command</td><td>—</td><td>An out-of-range value invalidates the stored command. Driving resumes only when a new valid command arrives</td></tr>
+<tr><td>SAFETY_POLL</td><td>5</td><td>ms</td><td>Safety and blinker check rate. Link loss is detected within about 95 ms</td></tr>
+<tr><td>BUTTON_DEBOUNCE</td><td>30</td><td>ms</td><td>Minimum time between accepted presses of the self-test button</td></tr>
+<tr><td>SELF_TEST_EXIT</td><td>Double press within 350</td><td>ms</td><td>A single press enters self-test (brake and hazards). A double press exits it</td></tr>
+</table>
+
+</body>
+</html>

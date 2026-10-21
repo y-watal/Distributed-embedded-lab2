@@ -346,7 +346,7 @@ static void udp_loop(void)
 		ssize_t n = recvfrom(udp_fd, buf, sizeof(buf), 0, (struct sockaddr *)&from, &from_len);
 
 		if (n < (ssize_t)PACKET_SIZE) {
-			continue; /* short read, EINTR or error */
+			continue; /* short read, timeout (stop check), EINTR or error */
 		}
 		uint64_t t0 = now_ns();
 
@@ -781,8 +781,7 @@ static void *stdin_thread(void *arg)
 			printf("cockpit test fault cleared\n");
 			break;
 		case 'q':
-			atomic_store(&stop, true);
-			kill(getpid(), SIGTERM);
+			kill(getpid(), SIGTERM); /* same path as Ctrl-C */
 			break;
 		default:
 			printf("commands: m = next CTRL bad CRC, r = next CTRL out of range, "
@@ -799,8 +798,10 @@ static void on_signal(int sig)
 		atomic_store(&inject_malformed, true);
 	} else if (sig == SIGUSR2) {
 		atomic_store(&inject_range, true);
-	} else {
-		atomic_store(&stop, true);
+	} else if (atomic_exchange(&stop, true)) {
+		/* Second Ctrl-C: leave now. */
+		tp_all_low();
+		_exit(130);
 	}
 }
 
@@ -912,6 +913,11 @@ int main(int argc, char **argv)
 		perror("UDP bind");
 		return 1;
 	}
+	/* Wake up at least every 200 ms with no wheel data, so a stop request is
+	 * seen even if no packet ever arrives. */
+	struct timeval rcv_timeout = {.tv_sec = 0, .tv_usec = 200000};
+
+	setsockopt(udp_fd, SOL_SOCKET, SO_RCVTIMEO, &rcv_timeout, sizeof(rcv_timeout));
 	if (opt.force_host) {
 		proxy_addr.sin_family = AF_INET;
 		proxy_addr.sin_port = htons((uint16_t)opt.force_port);
@@ -933,6 +939,19 @@ int main(int argc, char **argv)
 	}
 
 	pthread_t t_rx, t_timer, t_report, t_stdin;
+	sigset_t worker_mask, old_mask;
+
+	/*
+	 * Signals go to the main (UDP) thread only: the workers start with
+	 * SIGINT/SIGTERM/SIGUSR1/SIGUSR2 blocked, so Ctrl-C always interrupts the
+	 * UDP read instead of landing on a thread that ignores it.
+	 */
+	sigemptyset(&worker_mask);
+	sigaddset(&worker_mask, SIGINT);
+	sigaddset(&worker_mask, SIGTERM);
+	sigaddset(&worker_mask, SIGUSR1);
+	sigaddset(&worker_mask, SIGUSR2);
+	pthread_sigmask(SIG_BLOCK, &worker_mask, &old_mask);
 
 	pthread_create(&t_rx, NULL, can_rx_thread, NULL);
 	pthread_create(&t_timer, NULL, timer_thread, NULL);
@@ -947,6 +966,7 @@ int main(int argc, char **argv)
 		pthread_create(&t_stdin, NULL, stdin_thread, NULL);
 		pthread_detach(t_stdin);
 	}
+	pthread_sigmask(SIG_SETMASK, &old_mask, NULL); /* main thread takes the signals */
 
 	printf("cockpit: wheel packets on UDP %s:%d, CAN %s (A) / %s (B)%s. Type h for commands.\n",
 	       opt.bind_addr, opt.udp_port, opt.ifname[BUS_A], opt.ifname[BUS_B],
@@ -956,5 +976,6 @@ int main(int argc, char **argv)
 	atomic_store(&stop, true);
 	tp_all_low();
 	printf("cockpit stopped\n");
-	return 0;
+	fflush(stdout);
+	_exit(0); /* don't wait on worker threads blocked in poll/read/fgets */
 }

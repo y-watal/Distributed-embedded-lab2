@@ -250,8 +250,17 @@ def main():
         check("wheel data stops -> FAULT_N1 UDP_TIMEOUT within ~100 ms",
               f2 and 0.08 <= f2[0][0] - t <= 0.13, f"after {round(f2[0][0] - t, 3)} s" if f2 else "none")
         check("... and HB_N1 carries LOCAL_FAULT", bool(lf))
-    finally:
+        # 11. Ctrl-C with no wheel data must still stop the program promptly.
+        t = time.monotonic()
         sim.proc.send_signal(signal.SIGINT)
+        try:
+            sim.proc.wait(timeout=1.0)
+            check("Ctrl-C stops the program with no wheel data", True, f"{round(time.monotonic() - t, 2)} s")
+        except subprocess.TimeoutExpired:
+            check("Ctrl-C stops the program with no wheel data", False, "still running after 1 s")
+    finally:
+        if sim.proc.poll() is None:
+            sim.proc.send_signal(signal.SIGINT)
         try:
             out, _ = sim.proc.communicate(timeout=3)
         except subprocess.TimeoutExpired:

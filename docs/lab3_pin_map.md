@@ -8,7 +8,7 @@ resistor to GND, and the row doubles as the test point.
 The Lab 2 actuators and sensors stay on their **Lab 2 pins**, so the car's
 wiring carries over (except the blinker LEDs and the Pi UART, whose Lab 2
 pins now belong to the CAN modules). The test points that collided with them
-moved instead. Rows that are actuator signals (SRV, PWM_OUT, DIR_A) are a
+moved instead. Rows that are actuator signals (PWM_OUT, DIR_A) are a
 second wire from that pin to the breadboard row.
 
 `ERR` has a row on every node (N1 row 9, N3 row 14) even though the handout
@@ -28,7 +28,7 @@ the brake/throttle chain that marks only the CTRL that changed the target.
 | 6 | CAN_TX_B | GPIO19 (35) | CAN_TX_B | A3 / PB0 | CAN_TX_B | D14 / PB9 |
 | 7 | DEG_A (LED) | GPIO26 (37) | DEG_A (LED) | D15 / PB8 | DEG_A (LED) | A4 / PC1 |
 | 8 | DEG_B (LED) | GPIO16 (36) | DEG_B (LED) | A5 / PC0 | DEG_B (LED) | A5 / PC0 |
-| 9 | ERR *(added)* | GPIO20 (38) | SRV = servo PWM | D5 / PB4 | PWM_SET | D6 / PB10 |
+| 9 | ERR *(added)* | GPIO20 (38) | SRV | D14 / PB9 | PWM_SET | D6 / PB10 |
 | 10 | - | | FL (LED) | D6 / PB10 | PWM_OUT = left motor ENA | A0 / PA0 |
 | 11 | - | | FR (LED) | D7 / PA8 | DIR_A = H-bridge IN1 | PB12 (morpho) |
 | 12 | - | | RELAY_TX | D8 / PA9 | RL (LED) | D5 / PB4 |
@@ -50,7 +50,7 @@ button B1 (PC13) on both Nucleos.
 | RELAY_TX | Toggle when the relay queues a forwarded frame on the other bus |
 | DEG_A / DEG_B | On while that bus is degraded at this node (R4.7) |
 | ERR | High while the zone is in the error state |
-| SRV | The servo PWM itself (50 Hz, 0.5-2.5 ms) |
+| SRV | N2. Toggles every time the servo duty is set: once per CTRL STEER acts on (same angle or not) and when it re-centers. The servo PWM itself stays on D5 / PB4 (50 Hz, 0.5-2.5 ms) |
 | PWM_OUT | The left motor's enable PWM itself (10 kHz) |
 | PWM_SET | Toggles every time the motor is set: a duty (throttle; 0 = coast) or the brake, whether or not the output changed. DRIVE sets it once per CTRL it acts on and once when it drops to OFF, so with the PID compiled out that is one edge per CTRL that reaches the motor |
 | TARGET_CHG | N3 only. Toggles once when a CTRL changes the target speed (throttle step, or brake/release moving it to/from 0), right after DRIVE applies it. Not on PID writes, repeats of the same command, or the fail-safe drop to OFF |
@@ -58,8 +58,8 @@ button B1 (PC13) on both Nucleos.
 | FL, FR, RL, RR | The blinker LED outputs |
 
 In code: `src/tp.h` (`tp_toggle(TP_CAN_TX_A)`, `tp_set(TP_ERR, 1)`) with pins
-in each node's `app.overlay`; SRV, PWM_OUT and DIR_A are driven by
-`servo.c` / `motor.c`. On the Pi, `node1_pi/testpoints.py` (Python) and
+in each node's `app.overlay`; SRV is toggled in `servo.c`; PWM_OUT and DIR_A
+are driven by `motor.c`. On the Pi, `node1_pi/testpoints.py` (Python) and
 `node1_pi/testpoints.h` (C, /dev/gpiomem). The firmware and `can_test.py` walk
 every GPIO test point high for 300 ms at start-up so the wiring can be checked.
 
@@ -105,7 +105,7 @@ the module side; on the XIAO footprint D9 is MISO and D10 is MOSI.
 | PB6, PC7 / PA10, PB5 | CAN A / B chip select / interrupt | same |
 | PA13, PA14 | SWD (ST-LINK) | SWD |
 | PC13 | USER button B1 | USER button B1 |
-| Free on the Arduino headers | D14 / PB9 | none |
+| Free on the Arduino headers | none | none |
 
 Every pin above is claimed by exactly one peripheral or test point; this was
 checked against the generated devicetree of both builds. The overlays disable

@@ -20,7 +20,7 @@
 		can-tx-b-gpios = <&gpiob 0 GPIO_ACTIVE_HIGH>;	/* row 6:  CAN_TX_B, A3 / PB0 */
 		deg-a-gpios    = <&gpiob 8 GPIO_ACTIVE_HIGH>;	/* row 7:  DEG_A,    D15 / PB8, LED */
 		deg-b-gpios    = <&gpioc 0 GPIO_ACTIVE_HIGH>;	/* row 8:  DEG_B,    A5 / PC0, LED */
-		/* row 9:  SRV = servo PWM, D5 / PB4 (pwms below) */
+		srv-gpios      = <&gpiob 9 GPIO_ACTIVE_HIGH>;	/* row 9:  SRV,      D14 / PB9: toggles on each servo duty set (servo PWM itself: D5 / PB4) */
 		fl-gpios       = <&gpiob 10 GPIO_ACTIVE_HIGH>;	/* row 10: FL,       D6 / PB10, LED */
 		fr-gpios       = <&gpioa 8 GPIO_ACTIVE_HIGH>;	/* row 11: FR,       D7 / PA8,  LED */
 		relay-tx-gpios = <&gpioa 9 GPIO_ACTIVE_HIGH>;	/* row 12: RELAY_TX, D8 / PA9 */
@@ -38,7 +38,7 @@
 &wwdg { status = "disabled"; };
 
 &usart1 { status = "disabled"; };	/* PB6/PB7: PB6 is CAN A chip select */
-&i2c1 { status = "disabled"; };		/* PB8/PB9: PB8 is DEG_A */
+&i2c1 { status = "disabled"; };		/* PB8/PB9: DEG_A, SRV */
 &i2c3 { status = "disabled"; };		/* PA8/PC9: PA8 is FR */
 &pwm2 { status = "disabled"; };		/* PWM LED on PA5 = SPI1 SCK */
 &timers2 { status = "disabled"; };

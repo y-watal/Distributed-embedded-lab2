@@ -99,4 +99,4 @@ in `src/lab3_config.h` to skip). Then, once a second, with all three nodes up:
 
 ## Test points driven now
 
-All of this zone's rows: CAN_TX_A/B (every queued frame, including relayed ones), CAN_RX_A/B (every received copy), DEG_A/B, ERR, RELAY_TX, SRV (the servo PWM), and FL / FR (the front blinkers).
+All of this zone's rows: CAN_TX_A/B (every queued frame, including relayed ones), CAN_RX_A/B (every received copy), DEG_A/B, ERR, RELAY_TX, SRV (D14 / PB9: toggles on every servo duty set, once per CTRL that reaches the servo; the PWM itself is on D5 / PB4), and FL / FR (the front blinkers).

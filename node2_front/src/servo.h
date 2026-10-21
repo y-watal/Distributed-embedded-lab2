@@ -1,4 +1,5 @@
-/* Steering servo on TIM3_CH1 / PB4 (SRV test point), from Lab 2. */
+/* Steering servo on TIM3_CH1 / PB4, from Lab 2. servo_set_angle() toggles the
+ * SRV test point (D14 / PB9) on every successful set. */
 #ifndef SERVO_H
 #define SERVO_H
 

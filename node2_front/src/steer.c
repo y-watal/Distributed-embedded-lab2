@@ -4,7 +4,11 @@
  *
  * STEER wakes on every valid CTRL (and at least every ACTUATOR_POLL_MS). The
  * servo follows the wheel only while the zone is NORMAL and CTRL is fresh;
- * otherwise it returns to center, as in Lab 2.
+ * otherwise it returns to center, as in Lab 2. The servo duty is set once
+ * per CTRL acted on (even if the angle is the same) and whenever the angle
+ * changes otherwise (re-centering); poll wake-ups with nothing new don't
+ * touch it. Each set toggles SRV, so SRV marks every CTRL that reached the
+ * servo.
  */
 #include <zephyr/kernel.h>
 #include <zephyr/sys/atomic.h>
@@ -58,7 +62,9 @@ static void steer_thread(void *p1, void *p2, void *p3)
 		uint32_t age;
 		int angle = SERVO_CENTER_DEG;
 
-		ctrl_wait(K_MSEC(ACTUATOR_POLL_MS));
+		/* true: a CTRL arrived (or a reject / kick, which takes the zone out
+		 * of NORMAL first, so ok is false and the servo re-centers). */
+		bool woke = ctrl_wait(K_MSEC(ACTUATOR_POLL_MS));
 
 		bool ok = hb_zone_state() == ZONE_NORMAL && ctrl_get(&cmd, &age) &&
 			  age < CTRL_TIMEOUT_MS;
@@ -68,7 +74,7 @@ static void steer_thread(void *p1, void *p2, void *p3)
 		}
 		atomic_set(&following, ok);
 
-		if (angle != last_angle && servo_set_angle(angle) == 0) {
+		if ((angle != last_angle || (ok && woke)) && servo_set_angle(angle) == 0) {
 			last_angle = angle;
 			atomic_set(&angle_now, angle);
 		}

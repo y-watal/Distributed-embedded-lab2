@@ -5,8 +5,8 @@
  * points it has as <name>-gpios properties of the zephyr,user node; a point
  * the node doesn't have is a no-op, so shared code can call any of them.
  * Pin and breadboard-row assignments: docs/lab3_pin_map.md. Rows that are
- * actuator signals themselves (SRV, PWM_OUT, DIR_A) are wired to those pins
- * and driven by servo.c / motor.c, not by this module.
+ * actuator signals themselves (PWM_OUT, DIR_A) are wired to those pins and
+ * driven by motor.c, not by this module.
  */
 #ifndef TP_H
 #define TP_H
@@ -30,6 +30,7 @@ enum tp_id {
 	TP_RELAY_TX,  /* relay queued a forwarded frame (N2) */
 	TP_PWM_SET,   /* motor duty written (N3) */
 	TP_DIR_A,     /* unused: on N3 the DIR_A row is the H-bridge IN1 pin itself */
+	TP_SRV,       /* servo duty set (N2): once per CTRL STEER acts on, and on re-centering */
 	TP_TARGET_CHG, /* a CTRL changed the target speed (N3): brake/throttle edge, no PID writes */
 	TP_COUNT
 };

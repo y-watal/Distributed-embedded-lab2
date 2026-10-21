@@ -4,6 +4,7 @@
 #include <zephyr/sys/atomic.h>
 
 #include "catalog.h"
+#include "evlog.h"
 #include "hb.h"
 #include "lab3_config.h"
 #include "node_config.h"
@@ -41,6 +42,7 @@ static void blink_thread(void *p1, void *p2, void *p3)
 {
 	uint32_t next_local_toggle = 0;
 	bool local_phase = false;
+	uint8_t logged_mode = 0;
 
 	ARG_UNUSED(p1);
 	ARG_UNUSED(p2);
@@ -57,6 +59,15 @@ static void blink_thread(void *p1, void *p2, void *p3)
 
 		if (hazard_here) {
 			if (!atomic_get(&local_hazard)) {
+				if (zone_state() == ZONE_ISOLATED) {
+					evlog("local hazard ON: zone ISOLATED");
+				} else if (!hb_peer_alive(NODE_N1)) {
+					evlog("local hazard ON: N1 heartbeat lost");
+				} else if (rx == 0) {
+					evlog("local hazard ON: no BLINK received yet");
+				} else {
+					evlog("local hazard ON: no BLINK for %u ms", now - rx);
+				}
 				atomic_set(&local_hazard, 1);
 				local_phase = true;
 				next_local_toggle = now + BLINK_HALF_MS;
@@ -67,9 +78,20 @@ static void blink_thread(void *p1, void *p2, void *p3)
 			set_lamps(local_phase, local_phase);
 			continue;
 		}
+		if (atomic_get(&local_hazard)) {
+			evlog("local hazard off");
+		}
 		atomic_set(&local_hazard, 0);
 
 		uint8_t bits = (uint8_t)atomic_get(&last_bits);
+		uint8_t mode = bits & (BLINK_LEFT | BLINK_RIGHT);
+
+		if (mode != logged_mode) {
+			static const char *const names[] = {"off", "LEFT", "RIGHT", "HAZARD"};
+
+			evlog("cockpit BLINK %s -> %s", names[logged_mode], names[mode]);
+			logged_mode = mode;
+		}
 		bool on = bits & BLINK_PHASE;
 
 		set_lamps(on && (bits & BLINK_LEFT), on && (bits & BLINK_RIGHT));

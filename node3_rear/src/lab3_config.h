@@ -87,5 +87,6 @@
 #define PRIO_FORCE    9 /* N2: FORCE every 50 ms */
 #define PRIO_CURRENT  10
 #define PRIO_REPORT   12
+#define PRIO_EVLOG    13 /* event lines; below REPORT so it never splits a summary */
 
 #endif /* LAB3_CONFIG_H */

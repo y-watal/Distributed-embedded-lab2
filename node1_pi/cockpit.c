@@ -107,6 +107,8 @@ static uint8_t peer_fault_code[NUM_NODES];
 static uint64_t peer_fault_ns[NUM_NODES];
 static uint8_t peer_state[NUM_NODES]; /* from their heartbeats */
 static enum zone_state zone = ZONE_BOOT;
+static char zone_event[96]; /* set by monitor() on a zone change, printed by the timer thread */
+static uint64_t t0_ns;      /* program start, for event timestamps */
 static bool booted;
 static uint8_t local_fault = FAULT_NONE, last_fault = FAULT_NONE;
 static bool test_fault;        /* cockpit test button engaged */
@@ -686,9 +688,42 @@ static void monitor(uint64_t now)
 	if (!booted && all_alive && udp_ok) {
 		booted = true;
 	}
+	enum zone_state prev = zone;
+
 	zone = !booted ? ZONE_BOOT
 		       : ((local_fault || !all_alive || any_peer_fault) ? ZONE_SYS_ERROR : ZONE_NORMAL);
 	tp_set(TP_ERR, zone != ZONE_NORMAL);
+
+	if (zone != prev) {
+		/* Record why; the caller prints it after dropping the lock. */
+		int len = snprintf(zone_event, sizeof(zone_event), "zone %s -> %s:", zone_names[prev],
+				   zone_names[zone]);
+
+		if (local_fault && len < (int)sizeof(zone_event)) {
+			len += snprintf(zone_event + len, sizeof(zone_event) - (size_t)len,
+					" local 0x%02x%s", local_fault,
+					local_fault == FAULT_UDP_TIMEOUT ? " (no wheel data)" : "");
+		}
+		for (int n = NODE_N2; n <= NODE_N3 && len < (int)sizeof(zone_event); n++) {
+			size_t room = sizeof(zone_event) - (size_t)len;
+
+			if (!peer_alive[n]) {
+				len += snprintf(zone_event + len, room, " N%d lost (last HB A %lld ms, B %lld ms ago)",
+						n + 1,
+						last_hb_ns[BUS_A][n] ? (long long)((now - last_hb_ns[BUS_A][n]) / MS) : -1LL,
+						last_hb_ns[BUS_B][n] ? (long long)((now - last_hb_ns[BUS_B][n]) / MS) : -1LL);
+			} else if (peer_fault[n]) {
+				len += snprintf(zone_event + len, room, " N%d fault 0x%02x", n + 1,
+						peer_fault_code[n]);
+			} else if (peer_state[n] == ZONE_BOOT || peer_state[n] == ZONE_ISOLATED) {
+				len += snprintf(zone_event + len, room, " N%d %s", n + 1,
+						zone_names[peer_state[n]]);
+			}
+		}
+		if (len > 0 && len < (int)sizeof(zone_event) && zone_event[len - 1] == ':') {
+			zone_event[len - 1] = '\0';
+		}
+	}
 }
 
 static void *timer_thread(void *arg)
@@ -716,7 +751,15 @@ static void *timer_thread(void *arg)
 		pthread_mutex_lock(&lock);
 		monitor(now);
 		enum blink_mode mode = zone == ZONE_NORMAL ? selected : BLINK_HAZARD;
+		char event[sizeof(zone_event)];
+
+		memcpy(event, zone_event, sizeof(event));
+		zone_event[0] = '\0';
 		pthread_mutex_unlock(&lock);
+
+		if (event[0] && !opt.quiet) {
+			printf("[N1 %.3fs] >> %s\n", (double)(now - t0_ns) / 1e9, event);
+		}
 
 		/* BLINK master: on change (phase on), then a toggle every 500 ms. */
 		bool send = false;
@@ -763,7 +806,7 @@ static void *timer_thread(void *arg)
 
 static void *report_thread(void *arg)
 {
-	uint64_t start = now_ns(), next = start + 1000 * MS;
+	uint64_t start = t0_ns, next = now_ns() + 1000 * MS;
 
 	(void)arg;
 	while (!atomic_load(&stop)) {
@@ -945,6 +988,7 @@ static void usage(const char *prog)
 
 int main(int argc, char **argv)
 {
+	t0_ns = now_ns();
 	static const struct option longopts[] = {
 		{"port", required_argument, 0, 'p'},   {"bind", required_argument, 0, 'b'},
 		{"force-host", required_argument, 0, 'H'}, {"force-port", required_argument, 0, 'P'},

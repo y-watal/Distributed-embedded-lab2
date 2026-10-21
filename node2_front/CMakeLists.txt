@@ -11,6 +11,7 @@ target_sources(app PRIVATE
     src/canbus.c
     src/ctrl.c
     src/current_sensor.c
+    src/evlog.c
     src/hb.c
     src/relay.c
     src/report.c

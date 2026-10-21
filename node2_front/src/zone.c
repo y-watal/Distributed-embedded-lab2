@@ -5,6 +5,7 @@
 
 #include "canbus.h"
 #include "ctrl.h"
+#include "evlog.h"
 #include "hb.h"
 #include "lab3_config.h"
 #include "node_config.h"
@@ -103,6 +104,8 @@ void zone_update(void)
 	if (!booted && all_alive && fresh) {
 		booted = true;
 	}
+	enum zone_state prev = state;
+
 	state = !booted	     ? ZONE_BOOT
 		: none_alive ? ZONE_ISOLATED
 		: (local_fault || !all_alive || peer_bad) ? ZONE_SYS_ERROR
@@ -120,7 +123,50 @@ void zone_update(void)
 	}
 	enum zone_state st = state;
 
+	/* Why, for the event log (formatted after the lock is dropped). */
+	uint8_t why_lf = local_fault, why_lost = 0, why_bad = 0;
+	uint8_t why_code[NUM_NODES] = {0}, why_state[NUM_NODES] = {0};
+
+	if (st != prev) {
+		for (int n = 0; n < NUM_NODES; n++) {
+			if (n == NODE_SELF) {
+				continue;
+			}
+			if (!alive[n]) {
+				why_lost |= BIT(n);
+			} else if (peer_fault[n] || peer_state[n] == ZONE_BOOT ||
+				   peer_state[n] == ZONE_ISOLATED) {
+				why_bad |= BIT(n);
+				why_code[n] = peer_fault[n] ? peer_fault_code[n] : 0;
+				why_state[n] = peer_state[n];
+			}
+		}
+	}
+
 	k_spin_unlock(&lock, key);
+
+	if (st != prev) {
+		char why[56];
+		int len = 0;
+
+		why[0] = '\0';
+		if (why_lf) {
+			len += snprintk(why + len, sizeof(why) - len, " local 0x%02x", why_lf);
+		}
+		for (int n = 0; n < NUM_NODES && len < (int)sizeof(why); n++) {
+			if (why_lost & BIT(n)) {
+				len += snprintk(why + len, sizeof(why) - len, " N%d lost", n + 1);
+			} else if ((why_bad & BIT(n)) && why_code[n]) {
+				len += snprintk(why + len, sizeof(why) - len, " N%d fault 0x%02x", n + 1,
+						why_code[n]);
+			} else if (why_bad & BIT(n)) {
+				len += snprintk(why + len, sizeof(why) - len, " N%d %s", n + 1,
+						zone_state_name(why_state[n]));
+			}
+		}
+		evlog("zone %s -> %s%s%s", zone_state_name(prev), zone_state_name(st),
+		      why[0] ? ":" : "", why);
+	}
 
 	tp_set(TP_ERR, st != ZONE_NORMAL);
 	if (send) {

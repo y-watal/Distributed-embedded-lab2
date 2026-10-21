@@ -42,18 +42,36 @@ static inline void tp_set(int gpio, int level)
 		return;
 	}
 	if (level) {
-		tp_state |= 1u << gpio;
+		__atomic_or_fetch(&tp_state, 1u << gpio, __ATOMIC_RELAXED);
 		tp_gpio[TP_GPSET0] = 1u << gpio;
 	} else {
-		tp_state &= ~(1u << gpio);
+		__atomic_and_fetch(&tp_state, ~(1u << gpio), __ATOMIC_RELAXED);
 		tp_gpio[TP_GPCLR0] = 1u << gpio;
 	}
 }
 
-/* Not atomic across threads toggling the same pin; give each pin one owner. */
+/*
+ * Safe to call from several threads: the level bookkeeping is atomic, so
+ * threads toggling different pins never disturb each other. (Two threads
+ * toggling the same pin at the same instant can still swap the order of the
+ * two edges; give each latency-critical pin one owner.)
+ */
 static inline void tp_toggle(int gpio)
 {
-	tp_set(gpio, !(tp_state & (1u << gpio)));
+	if (!tp_gpio) {
+		return;
+	}
+	uint32_t s = __atomic_xor_fetch(&tp_state, 1u << gpio, __ATOMIC_RELAXED);
+
+	tp_gpio[(s >> gpio) & 1u ? TP_GPSET0 : TP_GPCLR0] = 1u << gpio;
+}
+
+/* Drives every test point low (call on exit). */
+static inline void tp_all_low(void)
+{
+	for (unsigned i = 0; i < sizeof(tp_all) / sizeof(tp_all[0]); i++) {
+		tp_set(tp_all[i], 0);
+	}
 }
 
 /* Maps the GPIO block and makes every test point an output, driven low. */

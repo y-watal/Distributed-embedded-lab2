@@ -1,0 +1,952 @@
+/*
+ * Lab 3 cockpit zone (N1) on the Raspberry Pi.
+ *
+ *   UDP_RX    (main thread, highest)  wheel packet -> CTRL on can0 and can1
+ *                                      immediately (R4.4); blinker and test
+ *                                      button logic after the writes
+ *   timer     every 20 ms HB_N1; every 5 ms HB_MON (DEG_A/B, peers, zone
+ *             state, ERR, UDP timeout), BLINK (master, 500 ms phase), FAULT_N1
+ *   can_rx    both buses: heartbeats, FAULT_N2/N3, FORCE -> UDP to the proxy
+ *   report    console summary once a second
+ *   stdin     typed commands (fault injection, test button)
+ *
+ * Test points (testpoints.h): UDP_RX toggles when a wheel packet arrives,
+ * CAN_TX_A/B on every frame written to that bus, CMD_TX right after the CTRL
+ * write to bus A, DEG_A/B and ERR as levels.
+ *
+ * Build: make     Run: sudo ./cockpit [--rt 80 --cpu 3]   (see --help)
+ */
+#define _GNU_SOURCE
+#include <arpa/inet.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <getopt.h>
+#include <linux/can.h>
+#include <linux/can/error.h>
+#include <linux/can/raw.h>
+#include <net/if.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <pthread.h>
+#include <sched.h>
+#include <signal.h>
+#include <stdatomic.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <sys/socket.h>
+#include <time.h>
+#include <unistd.h>
+
+#include "catalog_pi.h"
+#include "state.h"
+#include "testpoints.h"
+
+/* ---- Timing, same values as the Nucleos' lab3_config.h ---- */
+#define MS                  1000000ULL
+#define HB_PERIOD_NS        (20 * MS)
+#define HB_MAX_INTERVAL_NS  (22 * MS)
+#define DEG_TIMEOUT_NS      (2 * HB_MAX_INTERVAL_NS) /* 44 ms */
+#define FAIL_TIMEOUT_NS     (3 * HB_MAX_INTERVAL_NS) /* 66 ms */
+#define MONITOR_PERIOD_NS   (5 * MS)
+#define DUP_WINDOW_NS       (10 * MS)
+#define UDP_TIMEOUT_NS      (90 * MS)  /* Lab 2's command freshness limit */
+#define BLINK_HALF_NS       (500 * MS) /* 1 Hz blink (R2.4); catalog: toggle every 500 ms */
+#define MIN_EVENT_GAP_NS    (20 * MS)  /* catalog: BLINK and FAULT at least 20 ms apart */
+#define FAULT_CLEAR_HOLD_NS (HB_MAX_INTERVAL_NS + 3 * MS)
+
+/* ---- Lab 2 wheel logic ---- */
+#define TURN_THRESHOLD    5000 /* blinker arms past this steering */
+#define RETURN_THRESHOLD  4000 /* ... and cancels when back inside this */
+#define BUTTON_DEBOUNCE_NS (30 * MS)
+#define DOUBLE_PRESS_NS   (350 * MS)
+
+#define PACKET_SIZE (4 + sizeof(DIJOYSTATE2_t)) /* counter + joystick state */
+
+enum { BUS_A = 0, BUS_B = 1, NUM_BUSES = 2 };
+enum blink_mode { BLINK_OFF = 0, BLINK_MODE_LEFT = 1, BLINK_MODE_RIGHT = 2, BLINK_HAZARD = 3 };
+static const char *const blink_names[] = {"off", "LEFT", "RIGHT", "HAZARD"};
+static const char *const zone_names[] = {"BOOT", "SYS_ERROR", "NORMAL", "ISOLATED"};
+static const int tp_tx[NUM_BUSES] = {TP_CAN_TX_A, TP_CAN_TX_B};
+static const int tp_deg[NUM_BUSES] = {TP_DEG_A, TP_DEG_B};
+
+/* ---- Options ---- */
+static struct {
+	const char *bind_addr;
+	int udp_port;
+	const char *force_host; /* NULL: reply to whoever sends the wheel packets */
+	int force_port;
+	const char *ifname[NUM_BUSES];
+	int bitrate;
+	int rt_prio; /* 0: normal scheduling */
+	int cpu;     /* -1: no pinning */
+	bool quiet;
+	bool no_flush;
+} opt = {"0.0.0.0", 8765, NULL, 8001, {"can0", "can1"}, 500000, 0, -1, false, false};
+
+/* ---- Sockets ---- */
+static int can_fd[NUM_BUSES] = {-1, -1};
+static int udp_fd = -1;
+
+/* ---- State shared between threads (lock) ---- */
+static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t last_hb_ns[NUM_BUSES][NUM_NODES];
+static bool deg[NUM_BUSES] = {true, true};
+static bool peer_alive[NUM_NODES];
+static bool peer_fault[NUM_NODES];
+static uint8_t peer_fault_code[NUM_NODES];
+static uint64_t peer_fault_ns[NUM_NODES];
+static enum zone_state zone = ZONE_BOOT;
+static bool booted;
+static uint8_t local_fault = FAULT_NONE;
+static bool test_fault;        /* cockpit test button engaged */
+static uint64_t last_udp_ns;
+static bool have_udp;
+static struct ctrl_cmd last_cmd;
+static int32_t last_raw[3];
+static enum blink_mode selected = BLINK_OFF; /* driver's choice; hazard overrides */
+static struct sockaddr_in proxy_addr;
+static bool have_proxy;
+
+/* Read without the lock by the CTRL path (one byte, written by the timer). */
+static atomic_bool bus_deg[NUM_BUSES] = {true, true};
+
+/* ---- Fault injection and commands ---- */
+static atomic_bool inject_malformed, inject_range, stop;
+
+/* ---- Statistics ---- */
+static atomic_uint udp_count, ctrl_sent, dup_count, fault_rx, force_fwd;
+static atomic_int force_last;
+static atomic_uint tx_ok[NUM_BUSES], tx_err[NUM_BUSES], tx_skip[NUM_BUSES], err_frames[NUM_BUSES];
+static atomic_uint rx_count[NUM_BUSES][NUM_SLOTS];
+static atomic_bool busoff[NUM_BUSES];
+static atomic_ullong lat_sum_ns, lat_max_ns, lat_all_max_ns;
+static atomic_uint lat_n;
+
+static uint8_t tx_seq[NUM_SLOTS];
+
+static uint64_t now_ns(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+static void sleep_until(uint64_t t)
+{
+	struct timespec ts = {.tv_sec = (time_t)(t / 1000000000ULL),
+			      .tv_nsec = (long)(t % 1000000000ULL)};
+
+	while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL) == EINTR) {
+	}
+}
+
+static uint8_t next_seq(uint32_t id)
+{
+	int slot = catalog_slot(id);
+
+	return (uint8_t)(__atomic_fetch_add(&tx_seq[slot], 1, __ATOMIC_RELAXED) & SEQ_MASK);
+}
+
+/* Queues one frame on one bus; skips a degraded bus unless include_degraded. */
+static bool send_on(int bus, uint32_t id, const uint8_t data[FRAME_DLC], bool include_degraded)
+{
+	struct can_frame f = {.can_id = id, .can_dlc = FRAME_DLC};
+
+	if (!include_degraded && atomic_load_explicit(&bus_deg[bus], memory_order_relaxed)) {
+		atomic_fetch_add(&tx_skip[bus], 1);
+		return false;
+	}
+	memcpy(f.data, data, FRAME_DLC);
+	tp_toggle(tp_tx[bus]);
+	if (write(can_fd[bus], &f, sizeof(f)) != (ssize_t)sizeof(f)) {
+		atomic_fetch_add(&tx_err[bus], 1); /* queue full (no ACK) or interface down */
+		return false;
+	}
+	atomic_fetch_add(&tx_ok[bus], 1);
+	return true;
+}
+
+/* Sets the sequence number and queues on both buses back to back. */
+static void send_both(uint32_t id, uint8_t data[FRAME_DLC], bool include_degraded)
+{
+	data[0] = next_seq(id);
+	send_on(BUS_A, id, data, include_degraded);
+	send_on(BUS_B, id, data, include_degraded);
+}
+
+/* ===================================================================== */
+/* CAN setup                                                             */
+/* ===================================================================== */
+
+static int can_open(const char *ifname)
+{
+	int fd = socket(PF_CAN, SOCK_RAW, CAN_RAW);
+	struct ifreq ifr = {0};
+	struct sockaddr_can addr = {0};
+
+	if (fd < 0) {
+		return -1;
+	}
+	snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", ifname);
+	if (ioctl(fd, SIOCGIFINDEX, &ifr) < 0) {
+		close(fd);
+		return -1;
+	}
+	addr.can_family = AF_CAN;
+	addr.can_ifindex = ifr.ifr_ifindex;
+	if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+		close(fd);
+		return -1;
+	}
+
+	/* Only what the cockpit consumes: the other zones' FAULT and HB, FORCE. */
+	struct can_filter filters[] = {
+		{ID_FAULT(NODE_N2), CAN_SFF_MASK | CAN_EFF_FLAG | CAN_RTR_FLAG},
+		{ID_FAULT(NODE_N3), CAN_SFF_MASK | CAN_EFF_FLAG | CAN_RTR_FLAG},
+		{ID_HB(NODE_N2), CAN_SFF_MASK | CAN_EFF_FLAG | CAN_RTR_FLAG},
+		{ID_HB(NODE_N3), CAN_SFF_MASK | CAN_EFF_FLAG | CAN_RTR_FLAG},
+		{ID_FORCE, CAN_SFF_MASK | CAN_EFF_FLAG | CAN_RTR_FLAG},
+	};
+	setsockopt(fd, SOL_CAN_RAW, CAN_RAW_FILTER, filters, sizeof(filters));
+	can_err_mask_t err_mask = CAN_ERR_BUSOFF | CAN_ERR_CRTL | CAN_ERR_RESTARTED;
+	setsockopt(fd, SOL_CAN_RAW, CAN_RAW_ERR_FILTER, &err_mask, sizeof(err_mask));
+
+	/* Never block the brake path on a bus nobody ACKs. */
+	fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
+	return fd;
+}
+
+/*
+ * A link with no ACK keeps retrying what's queued; when it comes back, those
+ * stale frames go out first. Bouncing the interface drops them. Needs root;
+ * runs in its own thread so the timer isn't held up by `ip`.
+ */
+static void *flush_thread(void *arg)
+{
+	int bus = (int)(intptr_t)arg;
+	char cmd[160];
+
+	snprintf(cmd, sizeof(cmd),
+		 "ip link set %s down && ip link set %s up type can bitrate %d restart-ms 100",
+		 opt.ifname[bus], opt.ifname[bus], opt.bitrate);
+	if (system(cmd) != 0) {
+		fprintf(stderr, "flush of %s failed\n", opt.ifname[bus]);
+	}
+	return NULL;
+}
+
+static void flush_bus(int bus)
+{
+	pthread_t t;
+
+	if (opt.no_flush || geteuid() != 0) {
+		return;
+	}
+	if (pthread_create(&t, NULL, flush_thread, (void *)(intptr_t)bus) == 0) {
+		pthread_detach(t);
+	}
+}
+
+/* ===================================================================== */
+/* UDP_RX: the brake path                                                */
+/* ===================================================================== */
+
+static void record_latency(uint64_t ns)
+{
+	unsigned long long prev;
+
+	atomic_fetch_add(&lat_sum_ns, ns);
+	atomic_fetch_add(&lat_n, 1);
+	prev = atomic_load(&lat_max_ns);
+	while (ns > prev && !atomic_compare_exchange_weak(&lat_max_ns, &prev, ns)) {
+	}
+	prev = atomic_load(&lat_all_max_ns);
+	while (ns > prev && !atomic_compare_exchange_weak(&lat_all_max_ns, &prev, ns)) {
+	}
+}
+
+/* Lab 2 blinkers.c and the self-test button, after the CTRL is out. lock held. */
+static void wheel_logic(int32_t steer, bool b4, bool b5, bool b10, uint64_t now)
+{
+	static bool prev_b4, prev_b5, prev_b10, armed, exit_pending;
+	static uint64_t last_b10_ns, first_exit_ns;
+	bool right_press = b4 && !prev_b4;
+	bool left_press = b5 && !prev_b5;
+	bool test_press = b10 && !prev_b10 && now - last_b10_ns >= BUTTON_DEBOUNCE_NS;
+
+	prev_b4 = b4;
+	prev_b5 = b5;
+	prev_b10 = b10;
+
+	/* Button 10: single press = cockpit test fault, double press = recover. */
+	if (test_press) {
+		last_b10_ns = now;
+		if (!test_fault) {
+			test_fault = true;
+			exit_pending = false;
+		} else if (exit_pending && now - first_exit_ns <= DOUBLE_PRESS_NS) {
+			test_fault = false;
+			exit_pending = false;
+		} else {
+			first_exit_ns = now;
+			exit_pending = true;
+		}
+	}
+	if (exit_pending && now - first_exit_ns > DOUBLE_PRESS_NS) {
+		exit_pending = false;
+	}
+
+	/* Turn signals: only while NORMAL (otherwise hazards). */
+	if (zone != ZONE_NORMAL) {
+		selected = BLINK_OFF;
+		armed = false;
+		return;
+	}
+	if (right_press) {
+		selected = selected == BLINK_MODE_RIGHT ? BLINK_OFF : BLINK_MODE_RIGHT;
+		armed = false;
+	}
+	if (left_press) {
+		selected = selected == BLINK_MODE_LEFT ? BLINK_OFF : BLINK_MODE_LEFT;
+		armed = false;
+	}
+	/* Cancel after the turn: arm past the threshold, cancel back near center. */
+	if (selected == BLINK_MODE_RIGHT) {
+		if (steer >= TURN_THRESHOLD) {
+			armed = true;
+		} else if (armed && steer <= RETURN_THRESHOLD) {
+			selected = BLINK_OFF;
+			armed = false;
+		}
+	} else if (selected == BLINK_MODE_LEFT) {
+		if (steer <= -TURN_THRESHOLD) {
+			armed = true;
+		} else if (armed && steer >= -RETURN_THRESHOLD) {
+			selected = BLINK_OFF;
+			armed = false;
+		}
+	}
+}
+
+static void udp_loop(void)
+{
+	uint8_t buf[PACKET_SIZE + 16];
+	DIJOYSTATE2_t js;
+
+	while (!atomic_load(&stop)) {
+		struct sockaddr_in from;
+		socklen_t from_len = sizeof(from);
+		ssize_t n = recvfrom(udp_fd, buf, sizeof(buf), 0, (struct sockaddr *)&from, &from_len);
+
+		if (n < (ssize_t)PACKET_SIZE) {
+			continue; /* short read, EINTR or error */
+		}
+		uint64_t t0 = now_ns();
+
+		tp_toggle(TP_UDP_RX);
+		memcpy(&js, buf + 4, sizeof(js));
+
+		bool b4 = js.rgbButtons[4] != 0, b5 = js.rgbButtons[5] != 0;
+		bool b10 = js.rgbButtons[10] != 0;
+		struct ctrl_cmd cmd;
+		uint8_t data[FRAME_DLC];
+
+		ctrl_from_lab2(js.lX, js.lY, js.lRz, b4, b5, b10, &cmd);
+		if (atomic_exchange(&inject_range, false)) {
+			cmd.steer = CTRL_STEER_INVALID; /* receivers: FAULT_CTRL_RANGE */
+		}
+		data[0] = next_seq(ID_CTRL);
+		ctrl_encode(&cmd, data);
+		if (atomic_exchange(&inject_malformed, false)) {
+			data[6] ^= 0x5A; /* bad CRC; receivers: FAULT_CTRL_MALFORMED */
+		}
+
+		send_on(BUS_A, ID_CTRL, data, false);
+		tp_toggle(TP_CMD_TX);
+		send_on(BUS_B, ID_CTRL, data, false);
+		record_latency(now_ns() - t0);
+		atomic_fetch_add(&ctrl_sent, 1);
+		atomic_fetch_add(&udp_count, 1);
+
+		/* Everything below is off the brake path. */
+		pthread_mutex_lock(&lock);
+		last_udp_ns = t0;
+		have_udp = true;
+		last_cmd = cmd;
+		last_raw[0] = js.lX;
+		last_raw[1] = js.lY;
+		last_raw[2] = js.lRz;
+		if (!opt.force_host) {
+			proxy_addr = from;
+			proxy_addr.sin_port = htons((uint16_t)opt.force_port);
+			have_proxy = true;
+		}
+		wheel_logic(js.lX, b4, b5, b10, t0);
+		pthread_mutex_unlock(&lock);
+	}
+}
+
+/* ===================================================================== */
+/* CAN receive: heartbeats, FAULT, FORCE                                 */
+/* ===================================================================== */
+
+static void *can_rx_thread(void *arg)
+{
+	struct pollfd pfd[NUM_BUSES];
+	struct {
+		uint8_t seq;
+		uint64_t ns;
+		bool valid;
+	} seen[NUM_SLOTS] = {0};
+
+	(void)arg;
+	for (int b = 0; b < NUM_BUSES; b++) {
+		pfd[b].fd = can_fd[b];
+		pfd[b].events = POLLIN;
+	}
+
+	while (!atomic_load(&stop)) {
+		if (poll(pfd, NUM_BUSES, 200) <= 0) {
+			continue;
+		}
+		for (int bus = 0; bus < NUM_BUSES; bus++) {
+			struct can_frame f;
+
+			if (!(pfd[bus].revents & POLLIN)) {
+				continue;
+			}
+			while (read(can_fd[bus], &f, sizeof(f)) == (ssize_t)sizeof(f)) {
+				uint64_t now = now_ns();
+
+				if (f.can_id & CAN_ERR_FLAG) {
+					atomic_fetch_add(&err_frames[bus], 1);
+					if (f.can_id & CAN_ERR_BUSOFF) {
+						atomic_store(&busoff[bus], true);
+					}
+					continue;
+				}
+				uint32_t id = f.can_id & CAN_SFF_MASK;
+				int slot = catalog_slot(id);
+				int sender = catalog_sender(id);
+
+				if (slot < 0 || f.can_dlc != FRAME_DLC || sender <= NODE_N1) {
+					continue;
+				}
+				atomic_fetch_add(&rx_count[bus][slot], 1);
+
+				/* Presence counts every copy, relayed ones included. */
+				if (id == (uint32_t)ID_HB(sender)) {
+					pthread_mutex_lock(&lock);
+					last_hb_ns[bus][sender] = now;
+					pthread_mutex_unlock(&lock);
+				}
+
+				uint8_t seq = f.data[0] & SEQ_MASK;
+
+				if (seen[slot].valid && seen[slot].seq == seq &&
+				    now - seen[slot].ns < DUP_WINDOW_NS) {
+					atomic_fetch_add(&dup_count, 1);
+					continue;
+				}
+				seen[slot].seq = seq;
+				seen[slot].ns = now;
+				seen[slot].valid = true;
+
+				if (id == (uint32_t)ID_HB(sender)) {
+					bool lf = f.data[1] & HB_B1_LOCAL_FAULT;
+
+					pthread_mutex_lock(&lock);
+					if (lf) {
+						peer_fault[sender] = true;
+						peer_fault_code[sender] = f.data[3];
+					} else if (now - peer_fault_ns[sender] > FAULT_CLEAR_HOLD_NS) {
+						/* (an older HB can overtake a FAULT; hold the fault briefly) */
+						peer_fault[sender] = false;
+					}
+					pthread_mutex_unlock(&lock);
+				} else if (id == (uint32_t)ID_FAULT(sender)) {
+					atomic_fetch_add(&fault_rx, 1);
+					printf("FAULT from N%d: code 0x%02x detail 0x%02x\n", sender + 1,
+					       f.data[1], f.data[2]);
+					if (f.data[1] != FAULT_PEER_LOST) { /* PEER_LOST is informational */
+						pthread_mutex_lock(&lock);
+						peer_fault[sender] = true;
+						peer_fault_code[sender] = f.data[1];
+						peer_fault_ns[sender] = now;
+						pthread_mutex_unlock(&lock);
+					}
+				} else if (id == ID_FORCE) {
+					int8_t force = (int8_t)f.data[1];
+					struct sockaddr_in to;
+					bool ok;
+
+					atomic_store(&force_last, force);
+					pthread_mutex_lock(&lock);
+					to = proxy_addr;
+					ok = have_proxy;
+					pthread_mutex_unlock(&lock);
+					if (ok && sendto(udp_fd, &force, 1, 0, (struct sockaddr *)&to,
+							 sizeof(to)) == 1) {
+						atomic_fetch_add(&force_fwd, 1);
+					}
+				}
+			}
+		}
+	}
+	return NULL;
+}
+
+/* ===================================================================== */
+/* Timer: HB_TX, HB_MON, BLINK, FAULT_N1                                 */
+/* ===================================================================== */
+
+static bool heard(int bus, int node, uint64_t now, uint64_t timeout)
+{
+	return last_hb_ns[bus][node] != 0 && now - last_hb_ns[bus][node] <= timeout;
+}
+
+static void send_hb(void)
+{
+	uint8_t d[FRAME_DLC] = {0};
+
+	pthread_mutex_lock(&lock);
+	d[1] = (uint8_t)((zone & HB_B1_STATE_MASK) | (local_fault ? HB_B1_LOCAL_FAULT : 0));
+	d[2] = (uint8_t)((deg[BUS_A] ? HB_B2_A_DEGRADED : 0) | (deg[BUS_B] ? HB_B2_B_DEGRADED : 0));
+	d[3] = local_fault;
+	pthread_mutex_unlock(&lock);
+	d[2] |= (uint8_t)((atomic_exchange(&busoff[BUS_A], false) ? HB_B2_A_BUSOFF : 0) |
+			  (atomic_exchange(&busoff[BUS_B], false) ? HB_B2_B_BUSOFF : 0));
+	send_both(ID_HB(NODE_N1), d, true); /* heartbeats go out on degraded buses too */
+}
+
+static void send_fault(uint8_t code, uint8_t detail)
+{
+	uint8_t d[FRAME_DLC] = {0};
+
+	d[1] = code;
+	d[2] = detail;
+	send_both(ID_FAULT(NODE_N1), d, false);
+	printf("FAULT_N1 sent: code 0x%02x detail 0x%02x\n", code, detail);
+}
+
+#define FAULT_QUEUE 8
+static struct {
+	uint8_t code, detail;
+} fault_q[FAULT_QUEUE];
+static int fault_q_len;
+
+static void queue_fault(uint8_t code, uint8_t detail)
+{
+	if (fault_q_len < FAULT_QUEUE) {
+		fault_q[fault_q_len].code = code;
+		fault_q[fault_q_len].detail = detail;
+		fault_q_len++;
+	}
+}
+
+/* HB_MON. lock held. */
+static void monitor(uint64_t now)
+{
+	bool all_alive = true, any_peer_fault = false;
+
+	for (int bus = 0; bus < NUM_BUSES; bus++) {
+		bool heard_any = heard(bus, NODE_N2, now, DEG_TIMEOUT_NS) ||
+				 heard(bus, NODE_N3, now, DEG_TIMEOUT_NS);
+		bool d = !heard_any;
+
+		if (d != deg[bus]) {
+			deg[bus] = d;
+			atomic_store(&bus_deg[bus], d);
+			tp_set(tp_deg[bus], d);
+			if (d) {
+				flush_bus(bus);
+			}
+		}
+	}
+	for (int n = NODE_N2; n <= NODE_N3; n++) {
+		bool alive = heard(BUS_A, n, now, FAIL_TIMEOUT_NS) ||
+			     heard(BUS_B, n, now, FAIL_TIMEOUT_NS);
+
+		if (booted && peer_alive[n] && !alive) {
+			queue_fault(FAULT_PEER_LOST, (uint8_t)n); /* informational */
+		}
+		peer_alive[n] = alive;
+		all_alive = all_alive && alive;
+		any_peer_fault = any_peer_fault || (alive && peer_fault[n]);
+	}
+
+	bool udp_ok = have_udp && now - last_udp_ns < UDP_TIMEOUT_NS;
+	uint8_t lf = test_fault ? FAULT_TEST_BUTTON : (udp_ok ? FAULT_NONE : FAULT_UDP_TIMEOUT);
+
+	if (lf != local_fault) {
+		if (lf != FAULT_NONE && booted) {
+			queue_fault(lf, 0);
+		}
+		local_fault = lf;
+	}
+	if (!booted && all_alive && udp_ok) {
+		booted = true;
+	}
+	zone = !booted ? ZONE_BOOT
+		       : ((local_fault || !all_alive || any_peer_fault) ? ZONE_SYS_ERROR : ZONE_NORMAL);
+	tp_set(TP_ERR, zone != ZONE_NORMAL);
+}
+
+static void *timer_thread(void *arg)
+{
+	uint64_t now = now_ns();
+	uint64_t next_hb = now, next_mon = now;
+	uint64_t last_fault_ns = 0, last_blink_ns = 0, next_toggle = now;
+	enum blink_mode sent_mode = BLINK_OFF;
+	bool phase = false;
+
+	(void)arg;
+	while (!atomic_load(&stop)) {
+		sleep_until(next_hb < next_mon ? next_hb : next_mon);
+		now = now_ns();
+
+		if (now >= next_hb) {
+			send_hb();
+			next_hb += HB_PERIOD_NS;
+		}
+		if (now < next_mon) {
+			continue;
+		}
+		next_mon += MONITOR_PERIOD_NS;
+
+		pthread_mutex_lock(&lock);
+		monitor(now);
+		enum blink_mode mode = zone == ZONE_NORMAL ? selected : BLINK_HAZARD;
+		pthread_mutex_unlock(&lock);
+
+		/* BLINK master: on change (phase on), then a toggle every 500 ms. */
+		bool send = false;
+
+		if (mode != sent_mode && now - last_blink_ns >= MIN_EVENT_GAP_NS) {
+			sent_mode = mode;
+			phase = mode != BLINK_OFF;
+			next_toggle = now + BLINK_HALF_NS;
+			send = true;
+		} else if (now >= next_toggle) {
+			phase = sent_mode != BLINK_OFF && !phase;
+			next_toggle += BLINK_HALF_NS;
+			send = true; /* also refreshes "off" every 500 ms */
+		}
+		if (send) {
+			uint8_t d[FRAME_DLC] = {0};
+			static const uint8_t bits[] = {0, BLINK_LEFT, BLINK_RIGHT, BLINK_LEFT | BLINK_RIGHT};
+
+			d[1] = (uint8_t)(bits[sent_mode] | (phase ? BLINK_PHASE : 0));
+			send_both(ID_BLINK, d, false);
+			last_blink_ns = now;
+		}
+
+		/* FAULT_N1, at most one per 20 ms. */
+		pthread_mutex_lock(&lock);
+		if (fault_q_len > 0 && now - last_fault_ns >= MIN_EVENT_GAP_NS) {
+			uint8_t code = fault_q[0].code, detail = fault_q[0].detail;
+
+			memmove(&fault_q[0], &fault_q[1], (size_t)(fault_q_len - 1) * sizeof(fault_q[0]));
+			fault_q_len--;
+			pthread_mutex_unlock(&lock);
+			send_fault(code, detail);
+			last_fault_ns = now;
+		} else {
+			pthread_mutex_unlock(&lock);
+		}
+	}
+	return NULL;
+}
+
+/* ===================================================================== */
+/* Report and commands                                                   */
+/* ===================================================================== */
+
+static void *report_thread(void *arg)
+{
+	uint64_t start = now_ns(), next = start + 1000 * MS;
+
+	(void)arg;
+	while (!atomic_load(&stop)) {
+		sleep_until(next);
+		next += 1000 * MS;
+
+		uint64_t now = now_ns();
+		unsigned n = atomic_exchange(&lat_n, 0);
+		unsigned long long sum = atomic_exchange(&lat_sum_ns, 0);
+		unsigned long long mx = atomic_exchange(&lat_max_ns, 0);
+
+		pthread_mutex_lock(&lock);
+		enum zone_state z = zone;
+		uint8_t lf = local_fault;
+		bool alive2 = peer_alive[NODE_N2], alive3 = peer_alive[NODE_N3];
+		bool f2 = peer_fault[NODE_N2], f3 = peer_fault[NODE_N3];
+		uint8_t c2 = peer_fault_code[NODE_N2], c3 = peer_fault_code[NODE_N3];
+		bool d[NUM_BUSES] = {deg[BUS_A], deg[BUS_B]};
+		struct ctrl_cmd c = last_cmd;
+		int32_t raw[3] = {last_raw[0], last_raw[1], last_raw[2]};
+		uint64_t udp_age = have_udp ? (now - last_udp_ns) / MS : 0;
+		bool hu = have_udp;
+		enum blink_mode bm = z == ZONE_NORMAL ? selected : BLINK_HAZARD;
+		pthread_mutex_unlock(&lock);
+
+		if (opt.quiet) {
+			continue;
+		}
+		printf("[N1 %.1fs] %s | peers: N2 %s%s N3 %s%s | local fault 0x%02x%s\n",
+		       (double)(now - start) / 1e9, zone_names[z], alive2 ? "ok" : "LOST",
+		       f2 ? " (fault)" : "", alive3 ? "ok" : "LOST", f3 ? " (fault)" : "", lf,
+		       lf == FAULT_TEST_BUTTON ? " test button" : (lf == FAULT_UDP_TIMEOUT ? " no wheel data" : ""));
+		if (f2 || f3) {
+			printf("  peer fault codes: N2 0x%02x N3 0x%02x\n", c2, c3);
+		}
+		if (hu) {
+			printf("  wheel: %u pkt/s, last %llu ms ago | CTRL sent %u | raw steer %d thr %d "
+			       "brk %d -> steer %d thr %u brk %u btn 0x%x | blink %s\n",
+			       atomic_exchange(&udp_count, 0), (unsigned long long)udp_age,
+			       atomic_exchange(&ctrl_sent, 0), raw[0], raw[1], raw[2], c.steer,
+			       c.throttle, c.brake, c.buttons, blink_names[bm]);
+		} else {
+			printf("  wheel: no packets yet (is the proxy sending to UDP port %d?) | blink %s\n",
+			       opt.udp_port, blink_names[bm]);
+		}
+		if (n) {
+			printf("  UDP -> CAN write latency: mean %llu us, max %llu us (all-time max %llu us)\n",
+			       sum / n / 1000, mx / 1000, atomic_load(&lat_all_max_ns) / 1000);
+		}
+		for (int bus = 0; bus < NUM_BUSES; bus++) {
+			printf("  %c %s: DEG %d | tx ok %u err %u skip %u | error frames %u | rx:", 'A' + bus,
+			       opt.ifname[bus], d[bus], atomic_exchange(&tx_ok[bus], 0),
+			       atomic_exchange(&tx_err[bus], 0), atomic_exchange(&tx_skip[bus], 0),
+			       atomic_exchange(&err_frames[bus], 0));
+			bool any = false;
+
+			for (size_t s = 0; s < NUM_SLOTS; s++) {
+				unsigned k = atomic_exchange(&rx_count[bus][s], 0);
+
+				if (k) {
+					printf(" 0x%03x x%u", catalog_ids[s], k);
+					any = true;
+				}
+			}
+			printf("%s\n", any ? "" : " (nothing)");
+		}
+		printf("  dup %u | FAULT rx %u | force %d, forwarded %u\n", atomic_exchange(&dup_count, 0),
+		       atomic_exchange(&fault_rx, 0), atomic_load(&force_last),
+		       atomic_exchange(&force_fwd, 0));
+		fflush(stdout);
+	}
+	return NULL;
+}
+
+static void *stdin_thread(void *arg)
+{
+	char line[64];
+
+	(void)arg;
+	while (!atomic_load(&stop) && fgets(line, sizeof(line), stdin)) {
+		switch (line[0]) {
+		case 'm':
+			atomic_store(&inject_malformed, true);
+			printf("next CTRL: bad CRC\n");
+			break;
+		case 'r':
+			atomic_store(&inject_range, true);
+			printf("next CTRL: steering out of range\n");
+			break;
+		case 't':
+			pthread_mutex_lock(&lock);
+			test_fault = true;
+			pthread_mutex_unlock(&lock);
+			printf("cockpit test fault on\n");
+			break;
+		case 'c':
+			pthread_mutex_lock(&lock);
+			test_fault = false;
+			pthread_mutex_unlock(&lock);
+			printf("cockpit test fault cleared\n");
+			break;
+		case 'q':
+			atomic_store(&stop, true);
+			kill(getpid(), SIGTERM);
+			break;
+		default:
+			printf("commands: m = next CTRL bad CRC, r = next CTRL out of range, "
+			       "t = test fault on, c = clear it, q = quit\n");
+		}
+		fflush(stdout);
+	}
+	return NULL;
+}
+
+static void on_signal(int sig)
+{
+	if (sig == SIGUSR1) {
+		atomic_store(&inject_malformed, true);
+	} else if (sig == SIGUSR2) {
+		atomic_store(&inject_range, true);
+	} else {
+		atomic_store(&stop, true);
+	}
+}
+
+/* ===================================================================== */
+/* main                                                                  */
+/* ===================================================================== */
+
+static void set_rt(pthread_t t, int prio)
+{
+	if (opt.rt_prio > 0) {
+		struct sched_param sp = {.sched_priority = prio};
+		int err = pthread_setschedparam(t, SCHED_FIFO, &sp);
+
+		if (err) {
+			fprintf(stderr, "SCHED_FIFO %d: %s (run with sudo)\n", prio, strerror(err));
+		}
+	}
+	if (opt.cpu >= 0) {
+		cpu_set_t set;
+
+		CPU_ZERO(&set);
+		CPU_SET(opt.cpu, &set);
+		pthread_setaffinity_np(t, sizeof(set), &set);
+	}
+}
+
+static void usage(const char *prog)
+{
+	printf("usage: %s [options]\n"
+	       "  --port N          UDP port for wheel packets (default 8765)\n"
+	       "  --bind ADDR       local address to listen on (default 0.0.0.0)\n"
+	       "  --force-host IP   where FORCE goes (default: the wheel packets' sender)\n"
+	       "  --force-port N    proxy's force port (default 8001)\n"
+	       "  --can-a IF        bus A interface (default can0)\n"
+	       "  --can-b IF        bus B interface (default can1)\n"
+	       "  --bitrate N       used when re-raising a flushed interface (default 500000)\n"
+	       "  --rt PRIO         SCHED_FIFO: UDP thread PRIO, CAN rx PRIO-1, timer PRIO-2 (sudo)\n"
+	       "  --cpu N           pin all threads to CPU N\n"
+	       "  --no-flush        don't bounce an interface when its bus goes degraded\n"
+	       "  --quiet           no once-a-second summary\n"
+	       "While running, type m / r (corrupt the next CTRL), t / c (test fault on / off), q.\n"
+	       "Signals: SIGUSR1 = next CTRL bad CRC, SIGUSR2 = next CTRL out of range.\n",
+	       prog);
+}
+
+int main(int argc, char **argv)
+{
+	static const struct option longopts[] = {
+		{"port", required_argument, 0, 'p'},   {"bind", required_argument, 0, 'b'},
+		{"force-host", required_argument, 0, 'H'}, {"force-port", required_argument, 0, 'P'},
+		{"can-a", required_argument, 0, 'A'},  {"can-b", required_argument, 0, 'B'},
+		{"bitrate", required_argument, 0, 'r'}, {"rt", required_argument, 0, 'R'},
+		{"cpu", required_argument, 0, 'c'},    {"no-flush", no_argument, 0, 'n'},
+		{"quiet", no_argument, 0, 'q'},        {"help", no_argument, 0, 'h'},
+		{0, 0, 0, 0}};
+	int ch;
+
+	while ((ch = getopt_long(argc, argv, "h", longopts, NULL)) != -1) {
+		switch (ch) {
+		case 'p': opt.udp_port = atoi(optarg); break;
+		case 'b': opt.bind_addr = optarg; break;
+		case 'H': opt.force_host = optarg; break;
+		case 'P': opt.force_port = atoi(optarg); break;
+		case 'A': opt.ifname[BUS_A] = optarg; break;
+		case 'B': opt.ifname[BUS_B] = optarg; break;
+		case 'r': opt.bitrate = atoi(optarg); break;
+		case 'R': opt.rt_prio = atoi(optarg); break;
+		case 'c': opt.cpu = atoi(optarg); break;
+		case 'n': opt.no_flush = true; break;
+		case 'q': opt.quiet = true; break;
+		default: usage(argv[0]); return ch == 'h' ? 0 : 2;
+		}
+	}
+
+	setvbuf(stdout, NULL, _IOLBF, 0);
+	if (tp_init() < 0) {
+		perror("test points: /dev/gpiomem (continuing without them)");
+	}
+	tp_set(TP_ERR, 1);
+	tp_set(TP_DEG_A, 1);
+	tp_set(TP_DEG_B, 1);
+
+	for (int bus = 0; bus < NUM_BUSES; bus++) {
+		/*
+		 * Test hook (test_cockpit.py): use an inherited socket pair instead
+		 * of a CAN interface, so the program can be exercised without CAN
+		 * hardware. Unset in normal use.
+		 */
+		const char *test_fd = getenv(bus == BUS_A ? "COCKPIT_TEST_FD_A" : "COCKPIT_TEST_FD_B");
+
+		if (test_fd) {
+			can_fd[bus] = atoi(test_fd);
+			opt.no_flush = true;
+			fcntl(can_fd[bus], F_SETFL, fcntl(can_fd[bus], F_GETFL) | O_NONBLOCK);
+			continue;
+		}
+		can_fd[bus] = can_open(opt.ifname[bus]);
+		if (can_fd[bus] < 0) {
+			fprintf(stderr, "%s: %s (run ./can_up.sh first)\n", opt.ifname[bus], strerror(errno));
+			return 1;
+		}
+	}
+
+	udp_fd = socket(AF_INET, SOCK_DGRAM, 0);
+	struct sockaddr_in addr = {.sin_family = AF_INET, .sin_port = htons((uint16_t)opt.udp_port)};
+
+	addr.sin_addr.s_addr = inet_addr(opt.bind_addr);
+	if (udp_fd < 0 || bind(udp_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+		perror("UDP bind");
+		return 1;
+	}
+	if (opt.force_host) {
+		proxy_addr.sin_family = AF_INET;
+		proxy_addr.sin_port = htons((uint16_t)opt.force_port);
+		proxy_addr.sin_addr.s_addr = inet_addr(opt.force_host);
+		have_proxy = true;
+	}
+
+	struct sigaction sa = {.sa_handler = on_signal}; /* no SA_RESTART: recvfrom returns */
+
+	sigemptyset(&sa.sa_mask);
+	sigaction(SIGINT, &sa, NULL);
+	sigaction(SIGTERM, &sa, NULL);
+	sa.sa_flags = SA_RESTART;
+	sigaction(SIGUSR1, &sa, NULL);
+	sigaction(SIGUSR2, &sa, NULL);
+
+	if (opt.rt_prio > 0 && mlockall(MCL_CURRENT | MCL_FUTURE) < 0) {
+		perror("mlockall");
+	}
+
+	pthread_t t_rx, t_timer, t_report, t_stdin;
+
+	pthread_create(&t_rx, NULL, can_rx_thread, NULL);
+	pthread_create(&t_timer, NULL, timer_thread, NULL);
+	pthread_create(&t_report, NULL, report_thread, NULL);
+	set_rt(pthread_self(), opt.rt_prio);
+	set_rt(t_rx, opt.rt_prio - 1);
+	set_rt(t_timer, opt.rt_prio - 2);
+	if (opt.cpu >= 0) {
+		set_rt(t_report, 0); /* pin only */
+	}
+	if (isatty(STDIN_FILENO)) {
+		pthread_create(&t_stdin, NULL, stdin_thread, NULL);
+		pthread_detach(t_stdin);
+	}
+
+	printf("cockpit: wheel packets on UDP %s:%d, CAN %s (A) / %s (B)%s. Type h for commands.\n",
+	       opt.bind_addr, opt.udp_port, opt.ifname[BUS_A], opt.ifname[BUS_B],
+	       opt.rt_prio > 0 ? ", SCHED_FIFO" : "");
+	udp_loop();
+
+	atomic_store(&stop, true);
+	tp_all_low();
+	printf("cockpit stopped\n");
+	return 0;
+}

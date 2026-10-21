@@ -116,8 +116,17 @@ static void report_thread(void *p1, void *p2, void *p3)
 			struct can_bus_err_cnt err = {0};
 
 			can_get_state(canbus_dev(bus), &st, &err);
-			printk("  %c: %s tec=%u rec=%u DEG %d | tx ok=%ld err=%ld full=%ld skip=%ld | rx:",
-			       'A' + bus, can_state_name(st), err.tx_err_cnt, err.rx_err_cnt,
+			/* MCP2515 RX overruns: a frame arrived with both RX buffers still unread. */
+			static uint32_t ovr_prev[NUM_BUSES];
+			uint32_t ovr = 0;
+#ifdef CONFIG_CAN_STATS
+			uint32_t ovr_now = can_stats_get_rx_overruns(canbus_dev(bus));
+
+			ovr = ovr_now - ovr_prev[bus];
+			ovr_prev[bus] = ovr_now;
+#endif
+			printk("  %c: %s tec=%u rec=%u ovr=%u DEG %d | tx ok=%ld err=%ld full=%ld skip=%ld | rx:",
+			       'A' + bus, can_state_name(st), err.tx_err_cnt, err.rx_err_cnt, ovr,
 			       hb_bus_degraded(bus), (long)atomic_clear(&b->tx_ok),
 			       (long)atomic_clear(&b->tx_err), (long)atomic_clear(&b->tx_full),
 			       (long)atomic_clear(&b->tx_skipped));

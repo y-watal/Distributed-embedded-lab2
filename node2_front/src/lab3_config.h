@@ -57,7 +57,14 @@
 
 /* Blinkers */
 #define BLINK_HALF_MS  500  /* local hazard rate when the cockpit can't be heard (1 Hz) */
-#define BLINK_STALE_MS 1100 /* no BLINK for this long: flash hazards locally */
+/*
+ * No BLINK for this long while N1's heartbeat is still heard: flash hazards
+ * locally. Losing the cockpit is detected by the heartbeat (66 ms); this is
+ * only a backstop for a cockpit that is alive but has stopped sending BLINK,
+ * so it tolerates 5 lost toggles. At 1100 ms (2 lost), a couple of frames
+ * dropped on a single-path relay (one bus unplugged) put up false hazards.
+ */
+#define BLINK_STALE_MS (5 * BLINK_HALF_MS + 100)
 
 /* FORCE_TX (N2): dummy counter every 50 ms */
 #define FORCE_PERIOD_MS 50

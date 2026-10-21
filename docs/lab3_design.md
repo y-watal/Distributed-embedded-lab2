@@ -193,7 +193,9 @@ Implemented on all three nodes: `node1_pi/cockpit.c` and `zone.c` on the Nucleos
   fail within 10 ms).
 - **Hazards**: the cockpit sends BLINK = hazard whenever it isn't NORMAL, and
   the STM32s follow it (front/rear in sync). An STM32 flashes hazards on its
-  own when it's ISOLATED, can't hear the cockpit, or gets no BLINK for 1.1 s.
+  own when it's ISOLATED, loses N1's heartbeat (66 ms), or gets no BLINK for
+  2.6 s (5 lost toggles; a backstop only - at 1.1 s, frames dropped on the
+  single relay path in the hop test put up false hazards).
 - **Watchdog**: each STM32's IWDG (250 ms) is fed every 100 ms only if HB_TX
   and the actuator task both checked in; a watchdog reset is reported at the
   next boot as WATCHDOG_RESET in heartbeat byte 3.

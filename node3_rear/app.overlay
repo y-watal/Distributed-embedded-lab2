@@ -125,8 +125,8 @@
 	can_a: can@0 {
 		compatible = "microchip,mcp2515";
 		reg = <0>;
-		/* Conservative for breadboard jumpers; MCP2515 maximum is 10 MHz. */
-		spi-max-frequency = <1000000>;
+		/* 4 MHz: at 1 MHz, back-to-back frames were being lost on a node with one bus unplugged. MCP2515 max is 10 MHz. */
+		spi-max-frequency = <4000000>;
 		int-gpios = <&gpioa 10 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
 		osc-freq = <16000000>;
 		bitrate = <500000>;
@@ -136,7 +136,7 @@
 	can_b: can@1 {
 		compatible = "microchip,mcp2515";
 		reg = <1>;
-		spi-max-frequency = <1000000>;
+		spi-max-frequency = <4000000>;
 		int-gpios = <&gpiob 5 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
 		osc-freq = <16000000>;
 		bitrate = <500000>;

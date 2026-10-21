@@ -4,9 +4,9 @@
  *
  * Follows the cockpit's BLINK frames: lamp on = its side's bit set and the
  * phase bit set, updated as soon as a frame arrives (both STM32s act on the
- * same frame, which is the front/rear sync). If the cockpit can't be heard
- * (lost, or no BLINK for BLINK_STALE_MS) or the zone is ISOLATED, the zone
- * flashes its own hazards at 1 Hz.
+ * same frame, which is the front/rear sync). If N1's heartbeat is lost, the
+ * zone is ISOLATED, or no BLINK arrives for BLINK_STALE_MS (2.6 s), the zone
+ * flashes its own hazards at 1 Hz. A single lost BLINK only delays one edge.
  */
 #ifndef BLINK_H
 #define BLINK_H

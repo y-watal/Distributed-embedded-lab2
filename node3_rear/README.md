@@ -1,8 +1,31 @@
-# N3 - rear Nucleo: CAN bring-up test
+# N3 - rear Nucleo (drivetrain): zone controller
 
-Sends `HB_N3` (`0x102`) every 20 ms on both CAN modules and prints a
-once-a-second receive summary on the ST-LINK virtual COM port (115200 baud).
-N2 is the same code with `NODE_NAME`/`HB_ID` changed at the top of `src/main.c`.
+The Lab 3 firmware for this zone: the shared dual-CAN layer, heartbeats, heartbeat
+monitoring with degraded LEDs and zone failure, the test points, and the Lab 2
+drivetrain: H-bridge, encoders, PID speed loop and motor current sensors.
+Design decisions (catalog, thresholds, priorities, relay): `docs/lab3_design.md`.
+
+Files listed under "shared" in `CMakeLists.txt` are identical in
+`node2_front/` and `node3_rear/`; `src/node_config.h` (identity, relay,
+current-sensor channels) and the zone's own actuator files differ.
+
+| File | What it does |
+|---|---|
+| `src/catalog.h` | Message IDs, payload layouts, CTRL range check (Lab 2 values) |
+| `src/lab3_config.h` | All thresholds and thread priorities |
+| `src/canbus.c` | Both controllers, catalog filters, send-on-both-buses helper with per-ID sequence numbers, dedup by (ID, seq), heartbeat ages per bus |
+| `src/hb.c` | HB_TX every 20 ms; HB_MON every 5 ms: DEG_A/B, zone failure, ERR |
+| `src/ctrl.c` | Latest valid CTRL (CRC and range checked), wakes the actuator task |
+| `src/current_sensor.c` | Lab 2 current sensors; channels from `node_config.h` (N3: both motors) |
+| `src/motor.c` | Lab 2 L298 H-bridge driver (PA0/PA1 PWM, PB12-15) |
+| `src/encoder.c` | Lab 2 wheel encoders (TIM1, TIM2) |
+| `src/drive.c` | DRIVE (CTRL -> brake / coast / PID target) and PID (10 ms speed loop) |
+| `src/relay.c` | N2 only: forwards the first copy of every N1/N3 frame to the other bus |
+| `src/report.c` | Console summary once a second |
+| `src/tp.c` | Test points (pins in `app.overlay`, map in `docs/lab3_pin_map.md`) |
+
+**Lab 2 hardware and test points:** wiring tables in `docs/lab3_pin_map.md`
+(the Lab 2 actuators and sensors keep their Lab 2 pins; the blinker LEDs moved).
 
 ## Wiring (Nucleo Arduino header -> XIAO CAN module)
 
@@ -19,23 +42,10 @@ The Lab 3 handout's table has MOSI/MISO swapped on the module side; the
 XIAO footprint is D9 = MISO, D10 = MOSI. If you change a pin, change
 `app.overlay` to match. Check `osc-freq` against the crystal on the module.
 
-## Test points
-
-Pins and breadboard rows are in `docs/lab3_pin_map.md`; the pins are set in
-`app.overlay`, and the code calls `tp_toggle()` / `tp_set()` from `src/tp.h`.
-At boot the firmware drives every test point high for 300 ms in turn and
-prints its name, so each row can be checked with an LED or a scope. Set
-`TP_WALK_MS` to 0 in `src/main.c` to skip it. After that:
-
-- CAN_TX_A/B toggle on every send, and CAN_RX_A/B on every received frame.
-- DEG_A/B are on while no other node's heartbeat has been heard on that bus for 60 ms.
-- ERR is on at power-up, and while another node is missing on both buses.
-- The PWM output idles at `PWM_IDLE_US`: PWM_OUT is 0 % (motor off); set `PWM_IDLE_US` to e.g. 50 to see a 50 % waveform. The remaining points are only driven by the boot walk.
-
 ## Build and flash
 
 ```
-west build -b nucleo_f401re node3_rear -d node3_rear/build
+west build -p always -b nucleo_f401re node3_rear -d node3_rear/build
 west flash -d node3_rear/build
 ```
 
@@ -43,18 +53,40 @@ With both Nucleos plugged into the same laptop, pick the board by its
 ST-LINK serial: `west flash -d node3_rear/build --dev-id <serial>`
 (list serials with `st-info --probe` or `STM32_Programmer_CLI -l`).
 
-## What to expect
+## Console (ST-LINK virtual COM port, 115200 baud)
+
+At boot every test point goes high for 300 ms in turn (set `TP_WALK_MS` to 0
+in `src/lab3_config.h` to skip). Then, once a second, with all three nodes up:
 
 ```
-CAN A (can@0): started
-CAN B (can@1): started
-[N3 12.000s] rx dropped 0 | ERR 0
-  A: error-active tec=0 rec=0 DEG 0 | tx ok=50 err=0 full=0 | rx: 0x100 x50 0x101 x50
-  B: error-active tec=0 rec=0 DEG 0 | tx ok=50 err=0 full=0 | rx: 0x100 x50 0x101 x50
+[N3 12.000s] NORMAL | peers: N1 ok N2 ok | dup 150 echo 50
+  A: error-active tec=0 rec=0 DEG 0 | tx ok=50 err=0 full=0 skip=0 | rx: 0x100 x50 0x101 x50
+  B: error-active tec=0 rec=0 DEG 0 | tx ok=50 err=0 full=0 skip=0 | rx: 0x100 x100 0x101 x50 0x102 x50
+  accepted: 0x100 x50 0x101 x50
+  ctrl: ok 50 malformed 0 range 0 | last: steer 0 throttle 128 brake 0 buttons 0x0, 3 ms ago
+  drive: PID target 327 mm/s | speed L 318 R 322 mm/s | duty L 612 R 598 /1000 | I L 410 mA | I R 395 mA
 ```
 
+(Example assumes N2 usually gets the bus A copy first, so its forwards land on bus B; the split between buses can differ, the `accepted` line can't.)
+
+- `drive`: OFF (dynamic brake: zone not NORMAL or CTRL older than 90 ms), BRAKE
+  (brake >= 4), COAST (throttle <= 2) or PID. Motors only run once both other
+  zones are heard and the Pi is sending CTRL.
+- The `ctrl` line counts CTRL frames accepted / rejected (bad CRC or reserved byte
+  = malformed, steering or button bits out of range = range) and shows the last one.
+- `0x102` is this node's heartbeat; `peers` turn `LOST` 66 ms after a zone's
+  heartbeat stops on both buses, and the state goes `SYS_ERROR` (ERR high).
+- `rx` counts every copy on that bus; `accepted` counts each (ID, seq) once.
+  `dup` is copies dropped, `echo` is this node's own frames relayed back by N2.
+- N3 sees N1's frames twice per bus (N1's copy and N2's forward), and its own
+  heartbeat comes back from N2 as `echo` (how many depends on which copy N2
+  sees first).
+- `DEG 1` (LED on): no other node heard on that bus for 44 ms. Pull one of
+  this node's CANH/CANL jumpers and that bus's DEG comes on, `tx full` climbs on
+  it, and everything keeps running on the other bus.
 - `not ready` at boot: SPI wiring, CS pin, or no 3V3 to the module.
-- `tx err`/`full` climbing and `tec` rising to error-passive: nobody ACKs,
-  so the bus isn't connected, there's no termination (measure 60 ohm
-  CANH-CANL powered off), or another node runs a different bitrate/oscillator.
-- IDs at x25 or x100 instead of x50: an `osc-freq`/`oscillator=` mismatch.
+- IDs at x25 or x100 instead of x50 in `accepted`: an `osc-freq`/`oscillator=` mismatch.
+
+## Test points driven now
+
+CAN_TX_A/B, CAN_RX_A/B, DEG_A/B, ERR, PWM_SET (every motor duty write), PWM_OUT (left motor PWM) and DIR_A (H-bridge IN1). RL and RR are only driven by the boot walk until BLINK is implemented.

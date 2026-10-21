@@ -3,4 +3,18 @@ cmake_minimum_required(VERSION 3.20.0)
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(node3_rear)
 
-target_sources(app PRIVATE src/main.c src/tp.c)
+target_sources(app PRIVATE
+    # shared with node2_front (identical files)
+    src/main.c
+    src/canbus.c
+    src/ctrl.c
+    src/current_sensor.c
+    src/hb.c
+    src/relay.c
+    src/report.c
+    src/tp.c
+    # N3 only: drivetrain zone
+    src/motor.c
+    src/encoder.c
+    src/drive.c
+)

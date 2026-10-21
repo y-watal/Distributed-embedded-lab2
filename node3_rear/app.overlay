@@ -1,6 +1,8 @@
 /*
- * N3 (rear): two MCP2515 CAN modules on SPI1 and the Lab 3 test points.
- * Full pin and breadboard-row map: docs/lab3_pin_map.md
+ * N3 (rear, drivetrain): two MCP2515 CAN modules on SPI1, the Lab 2 H-bridge,
+ * wheel encoders and motor current sensors (on their Lab 2 pins), and the
+ * Lab 3 test points. Full pin and breadboard-row map: docs/lab3_pin_map.md
+ * PC2, PC3, PC6, PC8 and PB12 are on the ST morpho headers (labelled on the board).
  */
 #include <zephyr/dt-bindings/gpio/gpio.h>
 #include <zephyr/dt-bindings/pwm/pwm.h>
@@ -11,43 +13,92 @@
 		can-b = &can_b;
 	};
 
-	/* Test points (src/tp.c). Rows 1-2 of the test-point board are GND. */
 	zephyr,user {
-		can-rx-a-gpios = <&gpioa 0 GPIO_ACTIVE_HIGH>;	/* row 3:  CAN_RX_A, A0 / PA0 */
-		can-rx-b-gpios = <&gpioa 1 GPIO_ACTIVE_HIGH>;	/* row 4:  CAN_RX_B, A1 / PA1 */
-		can-tx-a-gpios = <&gpioa 4 GPIO_ACTIVE_HIGH>;	/* row 5:  CAN_TX_A, A2 / PA4 */
-		can-tx-b-gpios = <&gpiob 0 GPIO_ACTIVE_HIGH>;	/* row 6:  CAN_TX_B, A3 / PB0 */
+		/* Test points (src/tp.c). Rows 1-2 of the test-point board are GND. */
+		can-rx-a-gpios = <&gpioc 2 GPIO_ACTIVE_HIGH>;	/* row 3:  CAN_RX_A, PC2 (morpho) */
+		can-rx-b-gpios = <&gpioc 3 GPIO_ACTIVE_HIGH>;	/* row 4:  CAN_RX_B, PC3 (morpho) */
+		can-tx-a-gpios = <&gpiob 8 GPIO_ACTIVE_HIGH>;	/* row 5:  CAN_TX_A, D15 / PB8 */
+		can-tx-b-gpios = <&gpiob 9 GPIO_ACTIVE_HIGH>;	/* row 6:  CAN_TX_B, D14 / PB9 */
 		deg-a-gpios    = <&gpioc 1 GPIO_ACTIVE_HIGH>;	/* row 7:  DEG_A,    A4 / PC1, LED */
 		deg-b-gpios    = <&gpioc 0 GPIO_ACTIVE_HIGH>;	/* row 8:  DEG_B,    A5 / PC0, LED */
 		pwm-set-gpios  = <&gpiob 10 GPIO_ACTIVE_HIGH>;	/* row 9:  PWM_SET,  D6 / PB10 */
-		/* row 10: PWM_OUT = PWM output, D5 / PB4 (see pwms) */
-		dir-a-gpios    = <&gpioa 8 GPIO_ACTIVE_HIGH>;	/* row 11: DIR_A,    D7 / PA8 */
-		rl-gpios       = <&gpioa 9 GPIO_ACTIVE_HIGH>;	/* row 12: RL,       D8 / PA9,  LED */
-		rr-gpios       = <&gpiob 9 GPIO_ACTIVE_HIGH>;	/* row 13: RR,       D14 / PB9, LED */
-		err-gpios      = <&gpiob 3 GPIO_ACTIVE_HIGH>;	/* row 14: ERR,      D3 / PB3 (added) */
-		/* PWM_OUT: 10 kHz motor PWM, as in Lab 2 */
-		pwms = <&pwm3 1 PWM_USEC(100) PWM_POLARITY_NORMAL>;
+		/* row 10: PWM_OUT = left motor ENA PWM, A0 / PA0 (pwms below) */
+		/* row 11: DIR_A   = H-bridge IN1, PB12 (hbridge-gpios below) */
+		rl-gpios       = <&gpiob 4 GPIO_ACTIVE_HIGH>;	/* row 12: RL,       D5 / PB4, LED */
+		rr-gpios       = <&gpioc 8 GPIO_ACTIVE_HIGH>;	/* row 13: RR,       PC8 (morpho), LED */
+		err-gpios      = <&gpioc 6 GPIO_ACTIVE_HIGH>;	/* row 14: ERR,      PC6 (morpho), added */
+
+		/* L298 H-bridge (src/motor.c), Lab 2 pins */
+		hbridge-gpios = <&gpiob 12 GPIO_ACTIVE_HIGH>,	/* IN1, also DIR_A */
+				<&gpiob 13 GPIO_ACTIVE_HIGH>,	/* IN2 */
+				<&gpiob 14 GPIO_ACTIVE_HIGH>,	/* IN3 */
+				<&gpiob 15 GPIO_ACTIVE_HIGH>;	/* IN4 */
+		pwms = <&pwm5 1 PWM_USEC(100) PWM_POLARITY_NORMAL>,	/* ENA, PA0 */
+		       <&pwm5 2 PWM_USEC(100) PWM_POLARITY_NORMAL>;	/* ENB, PA1 */
+		pwm-names = "motor_left", "motor_right";
 	};
 };
 
-/* ---- Board defaults that sit on pins this lab uses ---- */
+/* ---- Board defaults that sit on pins this node uses ---- */
 &usart1 { status = "disabled"; };	/* PB6/PB7: PB6 is CAN A chip select */
-&i2c1 { status = "disabled"; };		/* PB8/PB9 */
-&i2c3 { status = "disabled"; };		/* PA8/PC9: PA8 is a test point */
-&adc1 { status = "disabled"; };		/* PA0: test point */
+&i2c1 { status = "disabled"; };		/* PB8/PB9: CAN_TX_A/B test points */
+&i2c3 { status = "disabled"; };		/* PA8/PC9: PA8 is the left encoder */
+&spi2 { status = "disabled"; };		/* PB12-PB15: H-bridge IN1-IN4 */
 &pwm2 { status = "disabled"; };		/* PWM LED on PA5 = SPI1 SCK */
-&timers2 { status = "disabled"; };
 
-/* ---- PWM output on D5 / PB4 (TIM3_CH1), 1 MHz timer tick ---- */
-&timers3 {
+/* ---- Left encoder: TIM1 CH1/CH2 on PA8/PA9 (Lab 2) ---- */
+&timers1 {
+	status = "okay";
+	st,prescaler = <0>;
+
+	pwm {
+		status = "disabled";
+	};
+
+	left_encoder: qdec {
+		compatible = "st,stm32-qdec";
+		status = "okay";
+		pinctrl-0 = <&tim1_ch1_pa8 &tim1_ch2_pa9>;
+		pinctrl-names = "default";
+		st,encoder-mode = <3>;
+		st,input-filter-level = <3>;
+		st,counts-per-revolution = <1>;
+	};
+};
+
+/* ---- Right encoder: TIM2 CH1/CH2 on PA15/PB3 (Lab 2) ---- */
+&timers2 {
+	status = "okay";
+	st,prescaler = <0>;
+
+	right_encoder: qdec {
+		compatible = "st,stm32-qdec";
+		status = "okay";
+		pinctrl-0 = <&tim2_ch1_pa15 &tim2_ch2_pb3>;
+		pinctrl-names = "default";
+		st,encoder-mode = <3>;
+		st,input-filter-level = <3>;
+		st,counts-per-revolution = <1>;
+	};
+};
+
+/* ---- Motor enables ENA/ENB: TIM5 CH1/CH2 on PA0/PA1, 10 kHz (Lab 2) ---- */
+&timers5 {
 	status = "okay";
 	st,prescaler = <83>;
 
-	pwm3: pwm {
+	pwm5: pwm {
 		status = "okay";
-		pinctrl-0 = <&tim3_ch1_pb4>;
+		pinctrl-0 = <&tim5_ch1_pa0 &tim5_ch2_pa1>;
 		pinctrl-names = "default";
 	};
+};
+
+/* ---- Motor current sensors: left PB0 = ADC1_IN8, right PA4 = ADC1_IN4 (Lab 2) ---- */
+&adc1 {
+	pinctrl-0 = <&adc1_in4_pa4 &adc1_in8_pb0>;
+	pinctrl-names = "default";
+	status = "okay";
 };
 
 /*

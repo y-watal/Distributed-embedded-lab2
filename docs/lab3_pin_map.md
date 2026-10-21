@@ -5,8 +5,14 @@ injection"). Each node gets its own small breadboard, one signal per row,
 labeled on tape. LED rows (DEG, blinkers) drive an LED through a ~330 ohm
 resistor to GND, and the row doubles as the test point.
 
+The Lab 2 actuators and sensors stay on their **Lab 2 pins**, so the car's
+wiring carries over (except the blinker LEDs and the Pi UART, whose Lab 2
+pins now belong to the CAN modules). The test points that collided with them
+moved instead. Rows that are actuator signals (SRV, PWM_OUT, DIR_A) are a
+second wire from that pin to the breadboard row.
+
 `ERR` has a row on every node (N1 row 9, N3 row 14) even though the handout
-table lists it only for N2: checkoff step 1 and step 9 expect ERR high on all
+table lists it only for N2: checkoff steps 1 and 9 expect ERR high on all
 three nodes.
 
 ## Test-point breadboards
@@ -15,22 +21,22 @@ three nodes.
 |---:|---|---|---|---|---|---|
 | 1 | GND | GND (pin 39) | GND | GND | GND | GND |
 | 2 | GND | GND (pin 34) | GND | GND | GND | GND |
-| 3 | UDP_RX | GPIO5 (29) | CAN_RX_A | A0 / PA0 | CAN_RX_A | A0 / PA0 |
-| 4 | CMD_TX | GPIO6 (31) | CAN_RX_B | A1 / PA1 | CAN_RX_B | A1 / PA1 |
-| 5 | CAN_TX_A | GPIO13 (33) | CAN_TX_A | A2 / PA4 | CAN_TX_A | A2 / PA4 |
-| 6 | CAN_TX_B | GPIO19 (35) | CAN_TX_B | A3 / PB0 | CAN_TX_B | A3 / PB0 |
-| 7 | DEG_A (LED) | GPIO26 (37) | DEG_A (LED) | A4 / PC1 | DEG_A (LED) | A4 / PC1 |
+| 3 | UDP_RX | GPIO5 (29) | CAN_RX_A | A0 / PA0 | CAN_RX_A | PC2 (morpho) |
+| 4 | CMD_TX | GPIO6 (31) | CAN_RX_B | A1 / PA1 | CAN_RX_B | PC3 (morpho) |
+| 5 | CAN_TX_A | GPIO13 (33) | CAN_TX_A | A2 / PA4 | CAN_TX_A | D15 / PB8 |
+| 6 | CAN_TX_B | GPIO19 (35) | CAN_TX_B | A3 / PB0 | CAN_TX_B | D14 / PB9 |
+| 7 | DEG_A (LED) | GPIO26 (37) | DEG_A (LED) | D15 / PB8 | DEG_A (LED) | A4 / PC1 |
 | 8 | DEG_B (LED) | GPIO16 (36) | DEG_B (LED) | A5 / PC0 | DEG_B (LED) | A5 / PC0 |
-| 9 | ERR *(added)* | GPIO20 (38) | SRV (servo PWM) | D5 / PB4, TIM3_CH1 | PWM_SET | D6 / PB10 |
-| 10 | - | | FL (LED) | D6 / PB10 | PWM_OUT (motor PWM) | D5 / PB4, TIM3_CH1 |
-| 11 | - | | FR (LED) | D7 / PA8 | DIR_A | D7 / PA8 |
-| 12 | - | | RELAY_TX | D8 / PA9 | RL (LED) | D8 / PA9 |
-| 13 | - | | ERR | D3 / PB3 | RR (LED) | D14 / PB9 |
-| 14 | | | | | ERR *(added)* | D3 / PB3 |
+| 9 | ERR *(added)* | GPIO20 (38) | SRV = servo PWM | D5 / PB4 | PWM_SET | D6 / PB10 |
+| 10 | - | | FL (LED) | D6 / PB10 | PWM_OUT = left motor ENA | A0 / PA0 |
+| 11 | - | | FR (LED) | D7 / PA8 | DIR_A = H-bridge IN1 | PB12 (morpho) |
+| 12 | - | | RELAY_TX | D8 / PA9 | RL (LED) | D5 / PB4 |
+| 13 | - | | ERR | D3 / PB3 | RR (LED) | PC8 (morpho) |
+| 14 | | | | | ERR *(added)* | PC6 (morpho) |
 
-Both Nucleos use the same pins for rows 3-8 (the A0-A5 analog header, in row
-order), the same pin for ERR (D3) and the same pin for their PWM output (D5).
-The test button is the on-board blue USER button B1 (PC13) on both Nucleos.
+"Morpho" pins are on the two long ST morpho headers; their names are printed
+next to the header on the Nucleo. The test button is the on-board blue USER
+button B1 (PC13) on both Nucleos.
 
 ### What each point does
 
@@ -42,16 +48,35 @@ The test button is the on-board blue USER button B1 (PC13) on both Nucleos.
 | RELAY_TX | Toggle when the relay queues a forwarded frame on the other bus |
 | DEG_A / DEG_B | On while that bus is degraded at this node (R4.7) |
 | ERR | High while the zone is in the error state |
-| SRV / PWM_OUT | The servo (50 Hz) and motor (10 kHz) PWM signals themselves |
-| PWM_SET | Toggles when a new motor duty is written |
-| DIR_A | H-bridge direction level |
+| SRV | The servo PWM itself (50 Hz, 0.5-2.5 ms) |
+| PWM_OUT | The left motor's enable PWM itself (10 kHz) |
+| PWM_SET | Toggles on every motor duty write (drive, coast or brake) |
+| DIR_A | H-bridge IN1: low for forward drive and for brake (Lab 2 wiring) |
 | FL, FR, RL, RR | The blinker LED outputs |
 
-In code: `node2_front/src/tp.h` and `node3_rear/src/tp.h` (`tp_toggle(TP_CAN_TX_A)`,
-`tp_set(TP_ERR, 1)`), with pins in each node's `app.overlay`; on the Pi,
-`node1_pi/testpoints.py` (Python) and `node1_pi/testpoints.h` (C, /dev/gpiomem).
-The bring-up firmware and `can_test.py` walk every point high for 300 ms at
-start-up so the wiring can be checked with an LED or a scope.
+In code: `src/tp.h` (`tp_toggle(TP_CAN_TX_A)`, `tp_set(TP_ERR, 1)`) with pins
+in each node's `app.overlay`; SRV, PWM_OUT and DIR_A are driven by
+`servo.c` / `motor.c`. On the Pi, `node1_pi/testpoints.py` (Python) and
+`node1_pi/testpoints.h` (C, /dev/gpiomem). The firmware and `can_test.py` walk
+every GPIO test point high for 300 ms at start-up so the wiring can be checked.
+
+## Lab 2 actuators and sensors
+
+| Signal | Node | Nucleo pin | Peripheral |
+|---|---|---|---|
+| Steering servo | N2 | D5 / PB4 | TIM3_CH1, 50 Hz |
+| Servo current sensor | N2 | A4 / PC1 | ADC1_IN11 |
+| Left motor enable (ENA) | N3 | A0 / PA0 | TIM5_CH1, 10 kHz |
+| Right motor enable (ENB) | N3 | A1 / PA1 | TIM5_CH2, 10 kHz |
+| H-bridge IN1 / IN2 / IN3 / IN4 | N3 | PB12 / PB13 / PB14 / PB15 (morpho) | GPIO |
+| Left encoder A / B | N3 | D7 / PA8, D8 / PA9 | TIM1 quadrature |
+| Right encoder A / B | N3 | PA15 (morpho), D3 / PB3 | TIM2 quadrature |
+| Left motor current sensor | N3 | A3 / PB0 | ADC1_IN8 |
+| Right motor current sensor | N3 | A2 / PA4 | ADC1_IN4 |
+
+Blinker LEDs moved from their Lab 2 pins (PB5, PB10, PC7, PA10 are now CAN
+interrupt / chip-select lines): FL D6 / PB10 and FR D7 / PA8 on N2, RL D5 / PB4
+and RR PC8 on N3.
 
 ## CAN modules
 
@@ -68,18 +93,19 @@ the module side; on the XIAO footprint D9 is MISO and D10 is MOSI.
 | D6 | INT | GPIO25 (22) | GPIO24 (18) | D2 / PA10 | D4 / PB5 |
 | CANH / CANL | Bus | bus A rails | bus B rails | bus A rails | bus B rails |
 
-## Nucleo pins that are taken
+## Nucleo pins in use
 
-| Pins | Used by |
-|---|---|
-| PA2, PA3 (D1, D0) | USART2 console (ST-LINK virtual COM port) |
-| PA5, PA6, PA7 (D13-D11) | SPI1 to both CAN modules |
-| PB6, PC7 (D10, D9) | CAN A / CAN B chip select |
-| PA10, PB5 (D2, D4) | CAN A / CAN B interrupt |
-| PA13, PA14 | SWD (ST-LINK) |
-| PC13 | USER button B1 (test button) |
-| Free on the Arduino headers | D15 / PB8 (both), D14 / PB9 (N2 only) |
+| Pins | N2 front | N3 rear |
+|---|---|---|
+| PA2, PA3 (D1, D0) | USART2 console | USART2 console |
+| PA5, PA6, PA7 | SPI1 to both CAN modules | SPI1 to both CAN modules |
+| PB6, PC7 / PA10, PB5 | CAN A / B chip select / interrupt | same |
+| PA13, PA14 | SWD (ST-LINK) | SWD |
+| PC13 | USER button B1 | USER button B1 |
+| Free on the Arduino headers | D14 / PB9 | none |
 
-The overlays disable board defaults that would otherwise claim these pins:
-USART1 (PB6/PB7), I2C1 (PB8/PB9), I2C3 (PA8/PC9), ADC1 (PA0) and the TIM2 PWM
-LED on PA5. The on-board green LED LD2 shares PA5 with SPI1 SCK and can't be used.
+Every pin above is claimed by exactly one peripheral or test point; this was
+checked against the generated devicetree of both builds. The overlays disable
+board defaults that would otherwise claim them: USART1 (PB6/PB7), I2C1
+(PB8/PB9), I2C3 (PA8/PC9), SPI2 (PB12-PB15, N3) and the TIM2 PWM LED on PA5.
+The on-board green LED LD2 shares PA5 with SPI1 SCK and can't be used.

@@ -1,7 +1,6 @@
 #include "tp.h"
 
 #include <zephyr/devicetree.h>
-#include <zephyr/drivers/pwm.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/printk.h>
 
@@ -35,10 +34,6 @@ static const char *const tp_names[TP_COUNT] = {
 	[TP_PWM_SET] = "PWM_SET",   [TP_DIR_A] = "DIR_A",
 };
 
-#if DT_NODE_HAS_PROP(ZU, pwms)
-static const struct pwm_dt_spec tp_pwm = PWM_DT_SPEC_GET(ZU);
-#endif
-
 int tp_init(void)
 {
 	int ret = 0;
@@ -53,13 +48,6 @@ int tp_init(void)
 			ret = -EIO;
 		}
 	}
-
-#if DT_NODE_HAS_PROP(ZU, pwms)
-	if (!pwm_is_ready_dt(&tp_pwm)) {
-		printk("test point PWM: device not ready\n");
-		ret = -ENODEV;
-	}
-#endif
 	return ret;
 }
 
@@ -76,19 +64,4 @@ void tp_selftest(int ms_per_point)
 		gpio_pin_set_dt(&tp_pins[i], 0);
 	}
 	printk("\n");
-}
-
-bool tp_pwm_present(void)
-{
-	return DT_NODE_HAS_PROP(ZU, pwms);
-}
-
-int tp_pwm_set_pulse_us(uint32_t pulse_us)
-{
-#if DT_NODE_HAS_PROP(ZU, pwms)
-	return pwm_set_pulse_dt(&tp_pwm, PWM_USEC(pulse_us));
-#else
-	ARG_UNUSED(pulse_us);
-	return -ENOTSUP;
-#endif
 }

@@ -1,7 +1,8 @@
 # N1 - Raspberry Pi: CAN bring-up test
 
-Sends `HB_N1` (`0x100`) every 20 ms on `can0` (bus A) and `can1` (bus B) and
-prints a once-a-second receive summary.
+Sends `HB_N1` (`0x100`) every 20 ms on `can0` (bus A) and `can1` (bus B), drops
+duplicate copies by (ID, seq), runs the same heartbeat monitor as the Nucleos
+(DEG_A/B, zone failure, ERR) and prints a once-a-second summary.
 
 ## One-time setup
 
@@ -40,13 +41,21 @@ it is now the can1 interrupt, so move that debug pin before reusing the code.
 candump -c -t d any    # in a second terminal, raw view of both buses
 ```
 
-Expected once both Nucleos are running:
+Expected once both Nucleos are running (N2 relays, so each bus carries N3's
+frames twice and the Pi's own heartbeat comes back as `echo`):
 
 ```
-[N1 12.0s] ERR 0
+[N1 12.0s] NORMAL | peers: N2 ok N3 ok | dup 150 echo 50
   A can0: ERROR-ACTIVE DEG 0 | tx ok=50 err=0 | rx: 0x101 x50 0x102 x50
-  B can1: ERROR-ACTIVE DEG 0 | tx ok=50 err=0 | rx: 0x101 x50 0x102 x50
+  B can1: ERROR-ACTIVE DEG 0 | tx ok=50 err=0 | rx: 0x100 x50 0x101 x50 0x102 x100
+  accepted: 0x101 x50 0x102 x50
 ```
+
+(Example assumes N2 usually gets the bus A copy first, so its forwards land on bus B; the split between buses can differ, the `accepted` line can't.)
+
+`rx` counts every copy on that bus, `accepted` each (ID, seq) once. DEG comes
+on after 44 ms with no other node on that bus; a peer turns `LOST` after 66 ms
+missing on both buses. Same thresholds as the Nucleos (`docs/lab3_design.md`).
 
 ## Test points
 

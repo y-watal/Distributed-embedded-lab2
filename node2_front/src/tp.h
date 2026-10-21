@@ -4,7 +4,9 @@
  * The same file is used on N2 and N3. Each node's app.overlay lists the
  * points it has as <name>-gpios properties of the zephyr,user node; a point
  * the node doesn't have is a no-op, so shared code can call any of them.
- * Pin and breadboard-row assignments: docs/lab3_pin_map.md.
+ * Pin and breadboard-row assignments: docs/lab3_pin_map.md. Rows that are
+ * actuator signals themselves (SRV, PWM_OUT, DIR_A) are wired to those pins
+ * and driven by servo.c / motor.c, not by this module.
  */
 #ifndef TP_H
 #define TP_H
@@ -27,7 +29,7 @@ enum tp_id {
 	TP_RR,
 	TP_RELAY_TX,  /* relay queued a forwarded frame (N2) */
 	TP_PWM_SET,   /* motor duty written (N3) */
-	TP_DIR_A,     /* H-bridge direction (N3) */
+	TP_DIR_A,     /* unused: on N3 the DIR_A row is the H-bridge IN1 pin itself */
 	TP_COUNT
 };
 
@@ -38,10 +40,6 @@ int tp_init(void);
 
 /* Drives each point high for ms_per_point, one at a time, printing its name. */
 void tp_selftest(int ms_per_point);
-
-/* The node's PWM output (N2: SRV servo, N3: PWM_OUT motor), if it has one. */
-bool tp_pwm_present(void);
-int tp_pwm_set_pulse_us(uint32_t pulse_us);
 
 /* ISR-safe and cheap; no-ops for points this node doesn't have. */
 static inline void tp_toggle(enum tp_id id)

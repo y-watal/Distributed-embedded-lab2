@@ -179,6 +179,10 @@ def main():
     ap.add_argument("--probe", action="store_true",
                     help="print live axis values and exit")
     ap.add_argument("--quiet", action="store_true")
+    ap.add_argument("--stall-ms", type=float, default=50,
+                    help="report any gap between two sends longer than this, with "
+                         "the slowest step of the loop in that time (default %(default)s); "
+                         "the cockpit faults at 90")
     args = ap.parse_args()
 
     js = open_wheel(args.device)
@@ -204,6 +208,19 @@ def main():
     counter = 0
     last_force = None
     next_tx = time.monotonic()
+    # Stall tracking: the Pi faults (UDP_TIMEOUT) after 90 ms without a packet.
+    # A gap seen here is the Mac's fault; a gap the Pi sees but this doesn't
+    # report is the network's.
+    last_send = None
+    stalls = 0
+    worst_gap = 0.0
+    slow = {}  # step -> longest single run of it since the last send, seconds
+
+    def timed(step, t_start):
+        t = time.monotonic()
+        if t - t_start > slow.get(step, 0.0):
+            slow[step] = t - t_start
+        return t
 
     print("Sending to %s:%d every %dms, listening on %s:%d. Ctrl-C to stop.\n"
           % (args.remote, args.send_port, args.interval_ms,
@@ -211,7 +228,9 @@ def main():
 
     try:
         while True:
+            t = time.monotonic()
             pygame.event.pump()
+            t = timed("event.pump", t)
 
             steer = js.get_axis(args.steer)
             throttle = pedal(js.get_axis(args.throttle), args.invert_throttle)
@@ -220,7 +239,7 @@ def main():
             inject = (0 <= args.fault_button < len(buttons)
                       and bool(buttons[args.fault_button]))
 
-            now = time.monotonic()
+            now = timed("read wheel", t)
             if now >= next_tx:
                 next_tx += period
                 if inject:
@@ -236,6 +255,17 @@ def main():
                     if not args.quiet:
                         print("\nsend failed: %s" % e)
                 counter += 1
+                if last_send is not None:
+                    gap = now - last_send
+                    worst_gap = max(worst_gap, gap)
+                    if gap * 1000 > args.stall_ms:
+                        stalls += 1
+                        step, dur = max(slow.items(), key=lambda kv: kv[1])
+                        print("\n[stall %d] %.0f ms between sends; slowest step: %s %.0f ms"
+                              % (stalls, gap * 1000, step, dur * 1000), flush=True)
+                last_send = now
+                slow.clear()
+                now = timed("send", now)
 
             # Drain the return path. Nothing drives the wheel with it, but a
             # silent link is worth noticing, so we surface the last value.
@@ -248,6 +278,7 @@ def main():
                 pass
             except OSError:
                 pass
+            t = timed("drain force", now)
 
             if not args.quiet:
                 print("\rsteer %+.3f  thr %.2f  brk %.2f  sent %6d  force %s  %s"
@@ -256,10 +287,13 @@ def main():
                          "INJECT lX=%d lY=%d" % (args.fault_steer, args.fault_throttle)
                          if inject else " " * 24),
                       end="", flush=True)
+                t = timed("print status", t)
 
             time.sleep(0.002)
+            timed("sleep(2 ms)", t)
     except KeyboardInterrupt:
-        print("\nStopped.")
+        print("\nStopped. %d stalls over %.0f ms; longest gap between sends %.0f ms."
+              % (stalls, args.stall_ms, worst_gap * 1000))
     finally:
         tx.close()
         rx.close()

@@ -47,7 +47,7 @@ dmesg | grep -i mcp251     # both controllers should probe
 
 ```
 make
-./can_up.sh                       # both interfaces up at 500 kbit/s
+./can_up.sh                       # reset both chips, both interfaces up at 500 kbit/s
 ./cockpit                         # refuses to start if can0/can1 are down
 sudo ./cockpit --rt 80 --cpu 3    # SCHED_FIFO + pinned to core 3, for latency runs
 ./cockpit --help                  # ports, interfaces, options
@@ -72,12 +72,60 @@ The latency line is the software time from the wheel packet arriving to both
 CTRL writes returning; the report's Pi-stage number comes from the scope
 (UDP_RX to CMD_TX), with and without load.
 
-If the summary prints `*** can0 is DOWN ***`, or every peer shows `LOST`
-while the Nucleos are running, run `./can_up.sh` again. If `ip link` answers
-`Connection timed out`, the MCP2515 is ignoring mode changes; `can_up.sh` then
-re-probes that module (driver unbind/bind, which sends it an SPI RESET like a
-reboot does). Restart `cockpit` afterwards, since its sockets point at the old
-interface.
+If the summary prints `*** can0 is DOWN ***`, or a bus stays `DEG` while N2
+and N3 are fine on it, stop `cockpit`, run `./can_up.sh`, start `cockpit`
+again. See "Start-up and jumper-pull check" below.
+
+## Start-up and jumper-pull check
+
+Do this every session, and before the checkoff. We once had a Pi chip stuck:
+pulling the bus B jumper left bus A silent until a reboot. `ip link down/up`
+didn't help (`RTNETLINK answers: Connection timed out`), and restarting
+`cockpit` didn't either. Resetting both chips fixed it, and it hasn't come back
+since. The root cause was never pinned down, so the steps below make sure you
+always start from a clean reset and catch it if it returns.
+
+**1. Wiring (power off).**
+- Each bus measures 60 Ohm between CANH and CANL.
+- The Pi, N2, N3 and the bus breadboard each have their own GND wire. A
+  CANH/CANL jumper you pull must never be any node's only ground.
+- INT wires: the module on CE0 (pin 24) has D6 on pin 22 (GPIO25); the module
+  on CE1 (pin 26) has D6 on pin 18 (GPIO24).
+
+**2. Bring-up, in this order.**
+```
+./can_up.sh                       # resets both chips; both show ERROR-ACTIVE
+sudo ./cockpit --rt 80 --cpu 3    # start (or restart) it only after can_up.sh
+```
+`can_up.sh` gives new interfaces, so a `cockpit` started before it is talking
+to interfaces that no longer exist. Check that `cockpit` prints
+`bus A = canX (SPI0 CE0), bus B = canY (SPI0 CE1)`, and that its summary
+shows N2 and N3 `ok`, `DEG 0` on both buses, and rx counts rising on both.
+
+**3. Both buses taking interrupts.**
+```
+grep spi0 /proc/interrupts; sleep 1; grep spi0 /proc/interrupts
+```
+Both lines (`spi0.0` = A, `spi0.1` = B) rise by roughly the same amount, a
+few hundred per second.
+
+**4. Pull test, each Pi jumper in turn (A, then B).** For each one:
+- Pull it. Only that bus's DEG LED comes on, within 60 ms. The other bus keeps
+  counting rx in the summary, and its `spi0.x` count keeps rising. N2 and N3
+  stay NORMAL.
+- Wait at least 10 s, so the Pi has been retrying an unacknowledged frame
+  for a while.
+- Put it back. DEG goes off within 100 ms, and both `spi0.x` counts rise
+  again.
+
+Then do the same for N2's and N3's jumpers, and the hop (Pi B + N3 A).
+
+**If a bus dies during the test.** The signature is: its `spi0.x` count
+frozen, `pinctrl get 24,25` reading `hi`, and N2 and N3 still fine on that bus.
+1. Before resetting, run `sudo ./can_diag.sh 40 > diag.txt` while you pull and
+   restore a jumper again, and keep `diag.txt`.
+2. Stop `cockpit`, run `./can_up.sh`, restart `cockpit`.
+3. Write down what you pulled and in what order.
 
 **can0 / can1 aren't fixed.** Linux names the two modules in the order they
 probe, which can change between boots. Bus A is the module on SPI0 CE0 and

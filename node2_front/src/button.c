@@ -12,6 +12,7 @@
 #include <zephyr/sys/printk.h>
 
 #include "lab3_config.h"
+#include "wcet.h"
 #include "zone.h"
 
 #define BUTTON_STACK_SIZE 1024
@@ -35,13 +36,16 @@ static void button_thread(void *p1, void *p2, void *p3)
 {
 	uint32_t last_press = 0;
 	bool first = true;
+	struct wcet_job job = WCET_JOB(WCET_TEST_BTN);
 
 	ARG_UNUSED(p1);
 	ARG_UNUSED(p2);
 	ARG_UNUSED(p3);
 
 	for (;;) {
+		wcet_end(&job);
 		k_sem_take(&button_sem, K_FOREVER);
+		wcet_begin(&job);
 
 		uint32_t now = k_uptime_get_32();
 

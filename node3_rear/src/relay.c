@@ -7,6 +7,7 @@
 #include "lab3_config.h"
 #include "node_config.h"
 #include "tp.h"
+#include "wcet.h"
 
 struct relay_stats relay_stats;
 
@@ -37,13 +38,16 @@ static void relay_hook(const struct can_frame *frame, int bus)
 static void relay_thread(void *p1, void *p2, void *p3)
 {
 	struct relay_item item;
+	struct wcet_job job = WCET_JOB(WCET_RELAY);
 
 	ARG_UNUSED(p1);
 	ARG_UNUSED(p2);
 	ARG_UNUSED(p3);
 
 	for (;;) {
+		wcet_end(&job);
 		k_msgq_get(&relay_q, &item, K_FOREVER);
+		wcet_begin(&job);
 
 		int dst = item.src_bus == BUS_A ? BUS_B : BUS_A;
 

@@ -7,6 +7,7 @@
 #include "node_config.h"
 #include "tp.h"
 #include "watchdog.h"
+#include "wcet.h"
 #include "zone.h"
 
 #define HB_STACK_SIZE 1024
@@ -57,6 +58,8 @@ void hb_set_relay_active(bool active)
 
 static void hb_tx_thread(void *p1, void *p2, void *p3)
 {
+	struct wcet_job job = WCET_JOB(WCET_HB_TX);
+
 	ARG_UNUSED(p1);
 	ARG_UNUSED(p2);
 	ARG_UNUSED(p3);
@@ -64,7 +67,9 @@ static void hb_tx_thread(void *p1, void *p2, void *p3)
 	for (;;) {
 		uint8_t p[FRAME_DLC] = {0};
 
+		wcet_end(&job);
 		k_sem_take(&hb_due, K_FOREVER);
+		wcet_begin(&job);
 
 		/*
 		 * On a degraded bus the previous heartbeat is probably still sitting
@@ -103,12 +108,15 @@ static bool heard_within(int bus, int node, uint32_t now, uint32_t timeout_ms)
 static void hb_mon_thread(void *p1, void *p2, void *p3)
 {
 	int64_t next = k_uptime_get();
+	struct wcet_job job = WCET_JOB(WCET_HB_MON);
 
 	ARG_UNUSED(p1);
 	ARG_UNUSED(p2);
 	ARG_UNUSED(p3);
 
 	for (;;) {
+		wcet_begin(&job);
+
 		uint32_t now = k_uptime_get_32();
 
 		/* Degraded: no other node heard on this bus for DEG_TIMEOUT_MS. */
@@ -144,6 +152,7 @@ static void hb_mon_thread(void *p1, void *p2, void *p3)
 
 		zone_update();
 		watchdog_service();
+		wcet_end(&job);
 
 		next += MONITOR_PERIOD_MS;
 		k_sleep(K_TIMEOUT_ABS_MS(next));

@@ -1,5 +1,6 @@
 /* Ported from Lab 2 src/drivers/current_sensor.c and src/tasks/current_sensing.c. */
 #include "current_sensor.h"
+#include "wcet.h"
 
 #include <errno.h>
 
@@ -59,6 +60,7 @@ static int32_t convert_to_ma(int32_t raw_scaled, int i)
 
 static void current_thread(void *p1, void *p2, void *p3)
 {
+	struct wcet_job job = WCET_JOB(WCET_CURRENT);
 	int64_t next = k_uptime_get();
 
 	ARG_UNUSED(p1);
@@ -66,6 +68,8 @@ static void current_thread(void *p1, void *p2, void *p3)
 	ARG_UNUSED(p3);
 
 	for (;;) {
+		wcet_begin(&job);
+
 		int32_t sums[NUM_CHANNELS] = {0};
 		int16_t sample;
 		int ret = 0;
@@ -84,6 +88,7 @@ static void current_thread(void *p1, void *p2, void *p3)
 			atomic_set(&have_reading, 1);
 		}
 
+		wcet_end(&job);
 		next += CURRENT_PERIOD_MS;
 		k_sleep(K_TIMEOUT_ABS_MS(next));
 	}

@@ -8,6 +8,7 @@
 #include "lab3_config.h"
 #include "node_config.h"
 #include "tp.h"
+#include "wcet.h"
 
 #define DISPATCH_STACK_SIZE 1536
 #define RX_QUEUE_DEPTH      32
@@ -94,6 +95,7 @@ static void rx_cb(const struct device *dev, struct can_frame *frame, void *user_
 
 	ARG_UNUSED(dev);
 	tp_toggle(tp_rx[item.bus]);
+	wcet_driver_seen(item.bus);
 	if (k_msgq_put(&rx_q, &item, K_NO_WAIT) != 0) {
 		atomic_inc(&canbus_stats.rx_dropped);
 	}
@@ -120,15 +122,20 @@ static void state_cb(const struct device *dev, enum can_state state, struct can_
 static void dispatch_thread(void *p1, void *p2, void *p3)
 {
 	struct rx_item item;
+	struct wcet_job job = WCET_JOB(WCET_DISPATCH);
 
 	ARG_UNUSED(p1);
 	ARG_UNUSED(p2);
 	ARG_UNUSED(p3);
 
 	for (;;) {
+		wcet_end(&job);
 		k_msgq_get(&rx_q, &item, K_FOREVER);
+		wcet_begin(&job);
 
 		const struct can_frame *f = &item.frame;
+
+		job.slot = f->id == ID_CTRL ? WCET_DISPATCH_CTRL : WCET_DISPATCH;
 		int slot = slot_of(f->id);
 		int sender = catalog_sender(f->id);
 		int64_t now = k_uptime_get();

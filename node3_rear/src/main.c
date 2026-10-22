@@ -36,6 +36,7 @@
 #include "report.h"
 #include "tp.h"
 #include "watchdog.h"
+#include "wcet.h"
 #include "zone.h"
 
 /* Dispatch thread: route the first copy of each frame. */
@@ -57,6 +58,7 @@ int main(void)
 	       ID_HB(NODE_SELF), HB_PERIOD_MS, RELAY_ENABLED ? "on" : "off");
 
 	tp_init();
+	wcet_init();
 	if (TP_WALK_MS > 0) {
 		tp_selftest(TP_WALK_MS);
 	}

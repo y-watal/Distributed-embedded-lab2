@@ -16,6 +16,7 @@ target_sources(app PRIVATE
     src/relay.c
     src/report.c
     src/tp.c
+    src/wcet.c
     src/watchdog.c
     src/zone.c
     # N2 only: steering zone

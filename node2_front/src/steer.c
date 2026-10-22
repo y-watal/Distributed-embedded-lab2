@@ -23,6 +23,7 @@
 #include "lab3_config.h"
 #include "servo.h"
 #include "watchdog.h"
+#include "wcet.h"
 
 #define STEER_STACK_SIZE 1024
 #define FORCE_STACK_SIZE 768
@@ -52,6 +53,7 @@ static int wheel_to_servo_angle(int32_t steering)
 static void steer_thread(void *p1, void *p2, void *p3)
 {
 	int last_angle = -1;
+	struct wcet_job job = WCET_JOB(WCET_STEER);
 
 	ARG_UNUSED(p1);
 	ARG_UNUSED(p2);
@@ -64,7 +66,10 @@ static void steer_thread(void *p1, void *p2, void *p3)
 
 		/* true: a CTRL arrived (or a reject / kick, which takes the zone out
 		 * of NORMAL first, so ok is false and the servo re-centers). */
+		wcet_end(&job);
 		bool woke = ctrl_wait(K_MSEC(ACTUATOR_POLL_MS));
+
+		wcet_begin(&job);
 
 		bool ok = hb_zone_state() == ZONE_NORMAL && ctrl_get(&cmd, &age) &&
 			  age < CTRL_TIMEOUT_MS;
@@ -88,6 +93,7 @@ static void force_thread(void *p1, void *p2, void *p3)
 {
 	int64_t next = k_uptime_get();
 	int8_t force = 0;
+	struct wcet_job job = WCET_JOB(WCET_FORCE_TX);
 
 	ARG_UNUSED(p1);
 	ARG_UNUSED(p2);
@@ -96,8 +102,10 @@ static void force_thread(void *p1, void *p2, void *p3)
 	for (;;) {
 		uint8_t p[FRAME_DLC] = {0};
 
+		wcet_end(&job);
 		next += FORCE_PERIOD_MS;
 		k_sleep(K_TIMEOUT_ABS_MS(next));
+		wcet_begin(&job);
 		force = (int8_t)(force + 1);
 		p[1] = (uint8_t)force;
 		canbus_send(ID_FORCE, p, false);

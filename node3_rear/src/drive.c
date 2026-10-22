@@ -40,6 +40,7 @@
 #include "lab3_config.h"
 #include "motor.h"
 #include "watchdog.h"
+#include "wcet.h"
 
 /* 1 = Lab 2's closed-loop speed PID (needs the motors and encoders). */
 #define DRIVE_PID_ENABLED 0
@@ -160,6 +161,8 @@ static void set_mode_locked(enum drive_mode m)
 
 static void drive_thread(void *p1, void *p2, void *p3)
 {
+	struct wcet_job job = WCET_JOB(WCET_DRIVE);
+
 	ARG_UNUSED(p1);
 	ARG_UNUSED(p2);
 	ARG_UNUSED(p3);
@@ -170,7 +173,10 @@ static void drive_thread(void *p1, void *p2, void *p3)
 
 		/* true: a CTRL arrived (or a reject / test-button kick, which takes
 		 * the zone out of NORMAL first and so lands in the !ok branch). */
+		wcet_end(&job);
 		bool woke = ctrl_wait(K_MSEC(ACTUATOR_POLL_MS));
+
+		wcet_begin(&job);
 		bool ok = hb_zone_state() == ZONE_NORMAL && ctrl_get(&cmd, &age) &&
 			  age < CTRL_TIMEOUT_MS;
 
@@ -230,14 +236,17 @@ static void pid_thread(void *p1, void *p2, void *p3)
 	int64_t last_sample_ms = 0;
 	uint32_t epoch_seen = 0;
 	bool have_sample = false;
+	struct wcet_job job = WCET_JOB(WCET_PID);
 
 	ARG_UNUSED(p1);
 	ARG_UNUSED(p2);
 	ARG_UNUSED(p3);
 
 	for (;;) {
+		wcet_end(&job);
 		next += PID_PERIOD_MS;
 		k_sleep(K_TIMEOUT_ABS_MS(next));
+		wcet_begin(&job);
 
 		k_mutex_lock(&drive_lock, K_FOREVER);
 		bool active = mode == DRIVE_RUN;

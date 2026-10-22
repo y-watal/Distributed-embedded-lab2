@@ -12,6 +12,7 @@
 #include "lab3_config.h"
 #include "node_config.h"
 #include "relay.h"
+#include "wcet.h"
 
 #define REPORT_STACK_SIZE 1536
 
@@ -61,13 +62,17 @@ static void print_counts(atomic_t *counts, atomic_t *gaps)
 static void report_thread(void *p1, void *p2, void *p3)
 {
 	int64_t next = k_uptime_get() + REPORT_PERIOD_MS;
+	struct wcet_job job = WCET_JOB(WCET_REPORT);
+	unsigned int reports = 0;
 
 	ARG_UNUSED(p1);
 	ARG_UNUSED(p2);
 	ARG_UNUSED(p3);
 
 	for (;;) {
+		wcet_end(&job);
 		k_sleep(K_TIMEOUT_ABS_MS(next));
+		wcet_begin(&job);
 		next += REPORT_PERIOD_MS;
 
 		uint32_t ms = k_uptime_get_32();
@@ -150,6 +155,9 @@ static void report_thread(void *p1, void *p2, void *p3)
 		printk("\n");
 		printk("  blink: %s\n", blink_describe());
 		app_report();
+		if (WCET_MEASURE && ++reports % WCET_REPORT_EVERY == 0) {
+			wcet_report();
+		}
 	}
 }
 

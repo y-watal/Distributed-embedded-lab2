@@ -96,4 +96,13 @@
 #define PRIO_REPORT   12
 #define PRIO_EVLOG    13 /* event lines; below REPORT so it never splits a summary */
 
+/*
+ * WCET measurement (src/wcet.c): CPU time per job from Zephyr's per-thread
+ * usage counter, which stops while the thread is preempted or blocked.
+ * Needs CONFIG_THREAD_RUNTIME_STATS / CONFIG_SCHED_THREAD_USAGE in prj.conf.
+ * 0 compiles every probe away.
+ */
+#define WCET_MEASURE      1
+#define WCET_REPORT_EVERY 5 /* print the WCET table with every 5th summary */
+
 #endif /* LAB3_CONFIG_H */

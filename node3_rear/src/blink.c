@@ -9,6 +9,7 @@
 #include "lab3_config.h"
 #include "node_config.h"
 #include "tp.h"
+#include "wcet.h"
 #include "zone.h"
 
 #define BLINK_STACK_SIZE 1024
@@ -43,6 +44,7 @@ static void blink_thread(void *p1, void *p2, void *p3)
 	uint32_t next_local_toggle = 0;
 	bool local_phase = false;
 	uint8_t logged_mode = 0;
+	struct wcet_job job = WCET_JOB(WCET_BLINK);
 
 	ARG_UNUSED(p1);
 	ARG_UNUSED(p2);
@@ -50,7 +52,9 @@ static void blink_thread(void *p1, void *p2, void *p3)
 
 	for (;;) {
 		/* A frame wakes us at once; otherwise re-check every 10 ms. */
+		wcet_end(&job);
 		k_sem_take(&blink_new, K_MSEC(10));
+		wcet_begin(&job);
 
 		uint32_t now = k_uptime_get_32();
 		uint32_t rx = (uint32_t)atomic_get(&last_rx_ms);

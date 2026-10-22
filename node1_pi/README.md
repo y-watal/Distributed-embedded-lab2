@@ -73,7 +73,11 @@ CTRL writes returning; the report's Pi-stage number comes from the scope
 (UDP_RX to CMD_TX), with and without load.
 
 If the summary prints `*** can0 is DOWN ***`, or every peer shows `LOST`
-while the Nucleos are running, run `./can_up.sh` again.
+while the Nucleos are running, run `./can_up.sh` again. If `ip link` answers
+`Connection timed out`, the MCP2515 is ignoring mode changes; `can_up.sh` then
+re-probes that module (driver unbind/bind, which sends it an SPI RESET like a
+reboot does). Restart `cockpit` afterwards, since its sockets point at the old
+interface.
 
 **can0 / can1 aren't fixed.** Linux names the two modules in the order they
 probe, which can change between boots. Bus A is the module on SPI0 CE0 and

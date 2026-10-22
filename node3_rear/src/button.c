@@ -12,6 +12,7 @@
 #include <zephyr/sys/printk.h>
 
 #include "lab3_config.h"
+#include "jitter.h"
 #include "wcet.h"
 #include "zone.h"
 
@@ -21,6 +22,8 @@ static const struct gpio_dt_spec button = GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios)
 static struct gpio_callback button_cb;
 
 K_SEM_DEFINE(button_sem, 0, 1);
+static atomic_t press_cyc;              /* first interrupt of this press: J's start */
+static atomic_t isr_armed = ATOMIC_INIT(1);
 K_THREAD_STACK_DEFINE(button_stack, BUTTON_STACK_SIZE);
 static struct k_thread button_data;
 
@@ -29,6 +32,9 @@ static void button_isr(const struct device *dev, struct gpio_callback *cb, uint3
 	ARG_UNUSED(dev);
 	ARG_UNUSED(cb);
 	ARG_UNUSED(pins);
+	if (atomic_cas(&isr_armed, 1, 0)) {
+		atomic_set(&press_cyc, (atomic_val_t)jit_now());
+	}
 	k_sem_give(&button_sem);
 }
 
@@ -47,6 +53,10 @@ static void button_thread(void *p1, void *p2, void *p3)
 		k_sem_take(&button_sem, K_FOREVER);
 		wcet_begin(&job);
 
+		uint32_t press = (uint32_t)atomic_get(&press_cyc);
+
+		atomic_set(&isr_armed, 1);
+
 		uint32_t now = k_uptime_get_32();
 
 		if (!first && now - last_press < TEST_BTN_DEBOUNCE_MS) {
@@ -54,7 +64,7 @@ static void button_thread(void *p1, void *p2, void *p3)
 		}
 		first = false;
 		last_press = now;
-		zone_test_button();
+		zone_test_button(press);
 	}
 }
 

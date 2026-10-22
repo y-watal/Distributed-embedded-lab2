@@ -36,8 +36,19 @@ void canbus_set_handler(canbus_handler_t handler);
  */
 int canbus_send(uint32_t id, uint8_t payload[FRAME_DLC], bool include_degraded);
 
+/*
+ * Same, recording J = now - release (k_cycle_get_32() of the triggering event,
+ * from jit_now()) per bus once each copy is queued. release 0 records nothing.
+ */
+int canbus_send_at(uint32_t id, uint8_t payload[FRAME_DLC], bool include_degraded,
+		   uint32_t release);
+
 /* Queues a bit-identical copy of frame on one bus (the relay). */
 int canbus_forward(int bus, const struct can_frame *frame);
+int canbus_forward_at(int bus, const struct can_frame *frame, uint32_t release);
+
+/* In a relay hook / handler: k_cycle_get_32() when rx_cb got this frame. */
+uint32_t canbus_rx_cycles(void);
 
 /* Aborts every transmission still pending on bus (stale frames on a dead link). */
 void canbus_flush(int bus);

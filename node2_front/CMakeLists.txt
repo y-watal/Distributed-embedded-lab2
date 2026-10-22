@@ -17,6 +17,7 @@ target_sources(app PRIVATE
     src/report.c
     src/tp.c
     src/wcet.c
+    src/jitter.c
     src/watchdog.c
     src/zone.c
     # N2 only: steering zone

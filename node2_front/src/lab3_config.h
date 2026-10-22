@@ -105,4 +105,11 @@
 #define WCET_MEASURE      1
 #define WCET_REPORT_EVERY 5 /* print the WCET table with every 5th summary */
 
+/*
+ * Queuing jitter J per message (src/jitter.c): trigger -> frame queued in the
+ * MCP2515, wall clock, per bus. 0 compiles the recording away.
+ */
+#define JITTER_MEASURE      1
+#define JITTER_REPORT_EVERY 5 /* print with every 5th summary; "last" = that window */
+
 #endif /* LAB3_CONFIG_H */

@@ -12,6 +12,7 @@
 #include "lab3_config.h"
 #include "node_config.h"
 #include "relay.h"
+#include "jitter.h"
 #include "wcet.h"
 
 #define REPORT_STACK_SIZE 1536
@@ -155,8 +156,12 @@ static void report_thread(void *p1, void *p2, void *p3)
 		printk("\n");
 		printk("  blink: %s\n", blink_describe());
 		app_report();
-		if (WCET_MEASURE && ++reports % WCET_REPORT_EVERY == 0) {
+		++reports;
+		if (WCET_MEASURE && reports % WCET_REPORT_EVERY == 0) {
 			wcet_report();
+		}
+		if (JITTER_MEASURE && reports % JITTER_REPORT_EVERY == 0) {
+			jit_report();
 		}
 	}
 }

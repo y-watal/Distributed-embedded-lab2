@@ -18,6 +18,7 @@ struct relay_stats relay_stats;
 
 struct relay_item {
 	uint8_t src_bus;
+	uint32_t t_rx; /* rx_cb time: J's start */
 	struct can_frame frame;
 };
 K_MSGQ_DEFINE(relay_q, sizeof(struct relay_item), RELAY_QUEUE_DEPTH, 4);
@@ -28,7 +29,8 @@ static struct k_thread relay_data;
 /* Dispatch thread, first copy only: hand it to RELAY without waiting. */
 static void relay_hook(const struct can_frame *frame, int bus)
 {
-	struct relay_item item = {.src_bus = (uint8_t)bus, .frame = *frame};
+	struct relay_item item = {
+		.src_bus = (uint8_t)bus, .t_rx = canbus_rx_cycles(), .frame = *frame};
 
 	if (k_msgq_put(&relay_q, &item, K_NO_WAIT) != 0) {
 		atomic_inc(&relay_stats.dropped);
@@ -56,7 +58,7 @@ static void relay_thread(void *p1, void *p2, void *p3)
 			continue;
 		}
 		tp_toggle(TP_RELAY_TX);
-		if (canbus_forward(dst, &item.frame) == 0) {
+		if (canbus_forward_at(dst, &item.frame, item.t_rx) == 0) {
 			atomic_inc(&relay_stats.forwarded);
 		}
 	}

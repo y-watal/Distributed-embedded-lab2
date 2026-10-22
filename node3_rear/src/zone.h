@@ -36,7 +36,7 @@ void zone_ctrl_rejected(enum fault_code code);
 void zone_ctrl_accepted(void);
 
 /* TEST_BTN thread, one debounced press. */
-void zone_test_button(void);
+void zone_test_button(uint32_t press_cyc); /* jit_now() at the button interrupt */
 
 /* Reported in heartbeat byte 3 until a newer fault (e.g. WATCHDOG_RESET at boot). */
 void zone_note_fault(enum fault_code code);

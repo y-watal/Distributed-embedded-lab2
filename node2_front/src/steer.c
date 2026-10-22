@@ -23,6 +23,7 @@
 #include "lab3_config.h"
 #include "servo.h"
 #include "watchdog.h"
+#include "jitter.h"
 #include "wcet.h"
 
 #define STEER_STACK_SIZE 1024
@@ -35,6 +36,18 @@ K_THREAD_STACK_DEFINE(steer_stack, STEER_STACK_SIZE);
 K_THREAD_STACK_DEFINE(force_stack, FORCE_STACK_SIZE);
 static struct k_thread steer_data, force_data;
 static atomic_t force_value;
+
+/* FORCE_TX release: a 50 ms k_timer, like HB_TX, so J has a start instant. */
+K_SEM_DEFINE(force_due, 0, 1);
+static atomic_t force_release;
+
+static void force_timer_fn(struct k_timer *timer)
+{
+	ARG_UNUSED(timer);
+	atomic_set(&force_release, (atomic_val_t)jit_now());
+	k_sem_give(&force_due);
+}
+K_TIMER_DEFINE(force_timer, force_timer_fn, NULL);
 
 static atomic_t angle_now = ATOMIC_INIT(SERVO_CENTER_DEG);
 static atomic_t following; /* 1 while the servo follows the wheel */
@@ -91,7 +104,6 @@ static void steer_thread(void *p1, void *p2, void *p3)
  * counter in this lab (byte 1, int8, wraps). */
 static void force_thread(void *p1, void *p2, void *p3)
 {
-	int64_t next = k_uptime_get();
 	int8_t force = 0;
 	struct wcet_job job = WCET_JOB(WCET_FORCE_TX);
 
@@ -103,12 +115,11 @@ static void force_thread(void *p1, void *p2, void *p3)
 		uint8_t p[FRAME_DLC] = {0};
 
 		wcet_end(&job);
-		next += FORCE_PERIOD_MS;
-		k_sleep(K_TIMEOUT_ABS_MS(next));
+		k_sem_take(&force_due, K_FOREVER);
 		wcet_begin(&job);
 		force = (int8_t)(force + 1);
 		p[1] = (uint8_t)force;
-		canbus_send(ID_FORCE, p, false);
+		canbus_send_at(ID_FORCE, p, false, (uint32_t)atomic_get(&force_release));
 		atomic_set(&force_value, force);
 	}
 }
@@ -141,6 +152,7 @@ int app_init(void)
 	k_thread_create(&force_data, force_stack, K_THREAD_STACK_SIZEOF(force_stack),
 			force_thread, NULL, NULL, NULL, PRIO_FORCE, 0, K_NO_WAIT);
 	k_thread_name_set(&force_data, "force");
+	k_timer_start(&force_timer, K_MSEC(FORCE_PERIOD_MS), K_MSEC(FORCE_PERIOD_MS));
 	return 0;
 }
 

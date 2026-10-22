@@ -117,6 +117,8 @@ static bool have_udp;
 static struct ctrl_cmd last_cmd;
 static int32_t last_raw[3];
 static enum blink_mode selected = BLINK_OFF; /* driver's choice; hazard overrides */
+static uint64_t mode_event_ns;  /* J: when the blinker mode last changed (selected or zone) */
+static uint64_t test_fault_ns;  /* J: when the cockpit test fault was engaged */
 static struct sockaddr_in proxy_addr;
 static bool have_proxy;
 
@@ -136,6 +138,47 @@ static atomic_ullong lat_sum_ns, lat_max_ns, lat_all_max_ns;
 static atomic_ullong udp_gap_max_ns, udp_gap_all_max_ns; /* longest wait between wheel packets */
 static atomic_uint udp_gaps_over; /* gaps longer than UDP_TIMEOUT_NS */
 static atomic_uint lat_n;
+
+/*
+ * Queuing jitter J per message and bus: the triggering event -> write() of
+ * that frame returned (the frame is in the socket queue; the mcp251x driver
+ * loads it into the controller after that). Triggers:
+ *   CTRL          the wheel packet arriving (t0, just before UDP_RX toggles)
+ *   HB_N1         its 20 ms deadline
+ *   BLINK toggle  its 500 ms deadline
+ *   BLINK change  the wheel packet / zone change that changed the blinker mode
+ *                 (includes the 5 ms timer tick and the 20 ms BLINK spacing)
+ *   FAULT_N1      the fault becoming true (test button packet, wheel timeout
+ *                 expiring, peer silent for 66 ms); includes the 20 ms spacing
+ * Lock-free: the CTRL path only adds a clock read and a few atomics.
+ */
+enum { J_CTRL, J_FAULT_N1, J_HB_N1, J_BLINK_TOGGLE, J_BLINK_CHANGE, J_NUM };
+static const char *const j_names[J_NUM] = {
+	"CTRL        ", "FAULT_N1    ", "HB_N1       ", "BLINK toggle", "BLINK change"};
+static atomic_ullong j_max[J_NUM][NUM_BUSES], j_max_win[J_NUM][NUM_BUSES], j_sum[J_NUM][NUM_BUSES];
+static atomic_uint j_n[J_NUM][NUM_BUSES];
+#define J_REPORT_EVERY 5 /* seconds; "last" in the table is this window */
+
+static void atomic_max(atomic_ullong *a, unsigned long long v)
+{
+	unsigned long long prev = atomic_load(a);
+
+	while (v > prev && !atomic_compare_exchange_weak(a, &prev, v)) {
+	}
+}
+
+static void j_note(int msg, int bus, uint64_t release_ns, uint64_t queued_ns)
+{
+	if (msg < 0 || release_ns == 0 || queued_ns < release_ns) {
+		return;
+	}
+	uint64_t j = queued_ns - release_ns;
+
+	atomic_max(&j_max[msg][bus], j);
+	atomic_max(&j_max_win[msg][bus], j);
+	atomic_fetch_add(&j_sum[msg][bus], j);
+	atomic_fetch_add(&j_n[msg][bus], 1);
+}
 
 static uint8_t tx_seq[NUM_SLOTS];
 
@@ -163,8 +206,12 @@ static uint8_t next_seq(uint32_t id)
 	return (uint8_t)(__atomic_fetch_add(&tx_seq[slot], 1, __ATOMIC_RELAXED) & SEQ_MASK);
 }
 
-/* Queues one frame on one bus; skips a degraded bus unless include_degraded. */
-static bool send_on(int bus, uint32_t id, const uint8_t data[FRAME_DLC], bool include_degraded)
+/*
+ * Queues one frame on one bus; skips a degraded bus unless include_degraded.
+ * jmsg >= 0: record J = (write() returned) - release_ns for that message.
+ */
+static bool send_on_j(int bus, uint32_t id, const uint8_t data[FRAME_DLC], bool include_degraded,
+		      int jmsg, uint64_t release_ns)
 {
 	struct can_frame f = {.can_id = id, .can_dlc = FRAME_DLC};
 
@@ -178,16 +225,20 @@ static bool send_on(int bus, uint32_t id, const uint8_t data[FRAME_DLC], bool in
 		atomic_fetch_add(&tx_err[bus], 1); /* queue full (no ACK) or interface down */
 		return false;
 	}
+	if (jmsg >= 0) {
+		j_note(jmsg, bus, release_ns, now_ns());
+	}
 	atomic_fetch_add(&tx_ok[bus], 1);
 	return true;
 }
 
 /* Sets the sequence number and queues on both buses back to back. */
-static void send_both(uint32_t id, uint8_t data[FRAME_DLC], bool include_degraded)
+static void send_both_j(uint32_t id, uint8_t data[FRAME_DLC], bool include_degraded, int jmsg,
+			uint64_t release_ns)
 {
 	data[0] = next_seq(id);
-	send_on(BUS_A, id, data, include_degraded);
-	send_on(BUS_B, id, data, include_degraded);
+	send_on_j(BUS_A, id, data, include_degraded, jmsg, release_ns);
+	send_on_j(BUS_B, id, data, include_degraded, jmsg, release_ns);
 }
 
 /* ===================================================================== */
@@ -364,6 +415,7 @@ static void wheel_logic(int32_t steer, bool b4, bool b5, bool b10, uint64_t now)
 		last_b10_ns = now;
 		if (!test_fault) {
 			test_fault = true;
+			test_fault_ns = now;
 			exit_pending = false;
 		} else if (exit_pending && now - first_exit_ns <= DOUBLE_PRESS_NS) {
 			test_fault = false;
@@ -442,9 +494,9 @@ static void udp_loop(void)
 			data[6] ^= 0x5A; /* bad CRC; receivers: FAULT_CTRL_MALFORMED */
 		}
 
-		send_on(BUS_A, ID_CTRL, data, false);
+		send_on_j(BUS_A, ID_CTRL, data, false, J_CTRL, t0);
 		tp_toggle(TP_CMD_TX);
-		send_on(BUS_B, ID_CTRL, data, false);
+		send_on_j(BUS_B, ID_CTRL, data, false, J_CTRL, t0);
 		record_latency(now_ns() - t0);
 		atomic_fetch_add(&ctrl_sent, 1);
 		atomic_fetch_add(&udp_count, 1);
@@ -475,7 +527,12 @@ static void udp_loop(void)
 			proxy_addr.sin_port = htons((uint16_t)opt.force_port);
 			have_proxy = true;
 		}
+		enum blink_mode sel_before = selected;
+
 		wheel_logic(js.lX, b4, b5, b10, t0);
+		if (selected != sel_before && zone == ZONE_NORMAL) {
+			mode_event_ns = t0;
+		}
 		pthread_mutex_unlock(&lock);
 	}
 }
@@ -600,7 +657,7 @@ static bool heard(int bus, int node, uint64_t now, uint64_t timeout)
 	return last_hb_ns[bus][node] != 0 && now - last_hb_ns[bus][node] <= timeout;
 }
 
-static void send_hb(void)
+static void send_hb(uint64_t release_ns)
 {
 	uint8_t d[FRAME_DLC] = {0};
 
@@ -611,30 +668,33 @@ static void send_hb(void)
 	pthread_mutex_unlock(&lock);
 	d[2] |= (uint8_t)((atomic_exchange(&busoff[BUS_A], false) ? HB_B2_A_BUSOFF : 0) |
 			  (atomic_exchange(&busoff[BUS_B], false) ? HB_B2_B_BUSOFF : 0));
-	send_both(ID_HB(NODE_N1), d, true); /* heartbeats go out on degraded buses too */
+	/* heartbeats go out on degraded buses too */
+	send_both_j(ID_HB(NODE_N1), d, true, J_HB_N1, release_ns);
 }
 
-static void send_fault(uint8_t code, uint8_t detail)
+static void send_fault(uint8_t code, uint8_t detail, uint64_t release_ns)
 {
 	uint8_t d[FRAME_DLC] = {0};
 
 	d[1] = code;
 	d[2] = detail;
-	send_both(ID_FAULT(NODE_N1), d, false);
+	send_both_j(ID_FAULT(NODE_N1), d, false, J_FAULT_N1, release_ns);
 	printf("FAULT_N1 sent: code 0x%02x detail 0x%02x\n", code, detail);
 }
 
 #define FAULT_QUEUE 8
 static struct {
 	uint8_t code, detail;
+	uint64_t t; /* when the fault became true: J's start */
 } fault_q[FAULT_QUEUE];
 static int fault_q_len;
 
-static void queue_fault(uint8_t code, uint8_t detail)
+static void queue_fault(uint8_t code, uint8_t detail, uint64_t t)
 {
 	if (fault_q_len < FAULT_QUEUE) {
 		fault_q[fault_q_len].code = code;
 		fault_q[fault_q_len].detail = detail;
+		fault_q[fault_q_len].t = t;
 		fault_q_len++;
 	}
 }
@@ -663,7 +723,10 @@ static void monitor(uint64_t now)
 			     heard(BUS_B, n, now, FAIL_TIMEOUT_NS);
 
 		if (booted && peer_alive[n] && !alive) {
-			queue_fault(FAULT_PEER_LOST, (uint8_t)n); /* informational */
+			uint64_t last = last_hb_ns[BUS_A][n] > last_hb_ns[BUS_B][n] ? last_hb_ns[BUS_A][n]
+									      : last_hb_ns[BUS_B][n];
+
+			queue_fault(FAULT_PEER_LOST, (uint8_t)n, last + FAIL_TIMEOUT_NS); /* informational */
 		}
 		peer_alive[n] = alive;
 		all_alive = all_alive && alive;
@@ -678,7 +741,14 @@ static void monitor(uint64_t now)
 
 	if (lf != local_fault) {
 		if (lf != FAULT_NONE && booted) {
-			queue_fault(lf, 0);
+			uint64_t t = now;
+
+			if (lf == FAULT_TEST_BUTTON && test_fault_ns) {
+				t = test_fault_ns;
+			} else if (lf == FAULT_UDP_TIMEOUT && have_udp) {
+				t = last_udp_ns + UDP_TIMEOUT_NS;
+			}
+			queue_fault(lf, 0, t);
 		}
 		if (lf != FAULT_NONE) {
 			last_fault = lf;
@@ -690,9 +760,14 @@ static void monitor(uint64_t now)
 	}
 	enum zone_state prev = zone;
 
+	enum zone_state was = zone;
+
 	zone = !booted ? ZONE_BOOT
 		       : ((local_fault || !all_alive || any_peer_fault) ? ZONE_SYS_ERROR : ZONE_NORMAL);
 	tp_set(TP_ERR, zone != ZONE_NORMAL);
+	if ((was == ZONE_NORMAL) != (zone == ZONE_NORMAL)) {
+		mode_event_ns = now; /* hazards on / off: a BLINK change */
+	}
 
 	if (zone != prev) {
 		/* Record why; the caller prints it after dropping the lock. */
@@ -740,7 +815,7 @@ static void *timer_thread(void *arg)
 		now = now_ns();
 
 		if (now >= next_hb) {
-			send_hb();
+			send_hb(next_hb); /* J measured from the deadline */
 			next_hb += HB_PERIOD_NS;
 		}
 		if (now < next_mon) {
@@ -751,6 +826,7 @@ static void *timer_thread(void *arg)
 		pthread_mutex_lock(&lock);
 		monitor(now);
 		enum blink_mode mode = zone == ZONE_NORMAL ? selected : BLINK_HAZARD;
+		uint64_t mode_t = mode_event_ns;
 		char event[sizeof(zone_event)];
 
 		memcpy(event, zone_event, sizeof(event));
@@ -763,13 +839,19 @@ static void *timer_thread(void *arg)
 
 		/* BLINK master: on change (phase on), then a toggle every 500 ms. */
 		bool send = false;
+		int blink_j = -1;
+		uint64_t blink_rel = 0;
 
 		if (mode != sent_mode && now - last_blink_ns >= MIN_EVENT_GAP_NS) {
+			blink_j = J_BLINK_CHANGE;
+			blink_rel = mode_t;
 			sent_mode = mode;
 			phase = mode != BLINK_OFF;
 			next_toggle = now + BLINK_HALF_NS;
 			send = true;
 		} else if (now >= next_toggle) {
+			blink_j = J_BLINK_TOGGLE;
+			blink_rel = next_toggle;
 			phase = sent_mode != BLINK_OFF && !phase;
 			next_toggle += BLINK_HALF_NS;
 			send = true; /* also refreshes "off" every 500 ms */
@@ -779,7 +861,7 @@ static void *timer_thread(void *arg)
 			static const uint8_t bits[] = {0, BLINK_LEFT, BLINK_RIGHT, BLINK_LEFT | BLINK_RIGHT};
 
 			d[1] = (uint8_t)(bits[sent_mode] | (phase ? BLINK_PHASE : 0));
-			send_both(ID_BLINK, d, false);
+			send_both_j(ID_BLINK, d, false, blink_j, blink_rel);
 			last_blink_ns = now;
 		}
 
@@ -787,11 +869,12 @@ static void *timer_thread(void *arg)
 		pthread_mutex_lock(&lock);
 		if (fault_q_len > 0 && now - last_fault_ns >= MIN_EVENT_GAP_NS) {
 			uint8_t code = fault_q[0].code, detail = fault_q[0].detail;
+			uint64_t fault_t = fault_q[0].t;
 
 			memmove(&fault_q[0], &fault_q[1], (size_t)(fault_q_len - 1) * sizeof(fault_q[0]));
 			fault_q_len--;
 			pthread_mutex_unlock(&lock);
-			send_fault(code, detail);
+			send_fault(code, detail, fault_t);
 			last_fault_ns = now;
 		} else {
 			pthread_mutex_unlock(&lock);
@@ -807,6 +890,7 @@ static void *timer_thread(void *arg)
 static void *report_thread(void *arg)
 {
 	uint64_t start = t0_ns, next = now_ns() + 1000 * MS;
+	unsigned reports = 0;
 
 	(void)arg;
 	while (!atomic_load(&stop)) {
@@ -886,6 +970,32 @@ static void *report_thread(void *arg)
 		printf("  dup %u | FAULT rx %u | force %d, forwarded %u\n", atomic_exchange(&dup_count, 0),
 		       atomic_exchange(&fault_rx, 0), atomic_load(&force_last),
 		       atomic_exchange(&force_fwd, 0));
+		if (++reports % J_REPORT_EVERY == 0) {
+			printf("  J, trigger -> write() returned, us: max since start / max last %d s / mean (frames)\n",
+			       J_REPORT_EVERY);
+			for (int m = 0; m < J_NUM; m++) {
+				bool any = false;
+
+				for (int bus = 0; bus < NUM_BUSES; bus++) {
+					unsigned k = atomic_load(&j_n[m][bus]);
+					unsigned long long win = atomic_exchange(&j_max_win[m][bus], 0);
+
+					if (k == 0) {
+						continue;
+					}
+					if (!any) {
+						printf("    %s", j_names[m]);
+						any = true;
+					}
+					printf("  %c %.1f / %.1f / %.1f (%u)", 'A' + bus,
+					       atomic_load(&j_max[m][bus]) / 1e3, win / 1e3,
+					       atomic_load(&j_sum[m][bus]) / 1e3 / k, k);
+				}
+				if (any) {
+					printf("\n");
+				}
+			}
+		}
 		fflush(stdout);
 	}
 	return NULL;
@@ -908,6 +1018,9 @@ static void *stdin_thread(void *arg)
 			break;
 		case 't':
 			pthread_mutex_lock(&lock);
+			if (!test_fault) {
+				test_fault_ns = now_ns();
+			}
 			test_fault = true;
 			pthread_mutex_unlock(&lock);
 			printf("cockpit test fault on\n");

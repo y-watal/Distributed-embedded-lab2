@@ -6,6 +6,7 @@
 #include "lab3_config.h"
 #include "node_config.h"
 #include "tp.h"
+#include "jitter.h"
 #include "watchdog.h"
 #include "wcet.h"
 #include "zone.h"
@@ -20,9 +21,12 @@ static atomic_t relay_active;
 
 K_SEM_DEFINE(hb_due, 0, 1);
 
+static atomic_t hb_release; /* k_cycle_get_32() at the last timer expiry: J's start */
+
 static void hb_timer_fn(struct k_timer *timer)
 {
 	ARG_UNUSED(timer);
+	atomic_set(&hb_release, (atomic_val_t)jit_now());
 	k_sem_give(&hb_due);
 }
 K_TIMER_DEFINE(hb_timer, hb_timer_fn, NULL);
@@ -93,7 +97,7 @@ static void hb_tx_thread(void *p1, void *p2, void *p3)
 		p[3] = zone_last_fault();
 
 		/* Heartbeats go out on degraded buses too: that's how the link recovers. */
-		canbus_send(ID_HB(NODE_SELF), p, true);
+		canbus_send_at(ID_HB(NODE_SELF), p, true, (uint32_t)atomic_get(&hb_release));
 		watchdog_checkin(WDT_HB_TX);
 	}
 }

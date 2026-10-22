@@ -8,6 +8,7 @@
 #include "lab3_config.h"
 #include "node_config.h"
 #include "tp.h"
+#include "jitter.h"
 #include "wcet.h"
 
 #define DISPATCH_STACK_SIZE 1536
@@ -45,6 +46,7 @@ static atomic_t bus_degraded[NUM_BUSES];
 static atomic_t bus_busoff[NUM_BUSES];
 
 static canbus_handler_t relay_hook;
+static uint32_t cur_rx_t; /* dispatch thread: t_rx of the frame being handled */
 static canbus_handler_t app_handler;
 
 /* Per-ID send sequence counters. */
@@ -66,6 +68,7 @@ static uint32_t last_hb_ms[NUM_BUSES][NUM_NODES];
 
 struct rx_item {
 	uint8_t bus;
+	uint32_t t_rx; /* k_cycle_get_32() in rx_cb */
 	struct can_frame frame;
 };
 K_MSGQ_DEFINE(rx_q, sizeof(struct rx_item), RX_QUEUE_DEPTH, 4);
@@ -94,6 +97,7 @@ static void rx_cb(const struct device *dev, struct can_frame *frame, void *user_
 	struct rx_item item = {.bus = (uint8_t)(uintptr_t)user_data, .frame = *frame};
 
 	ARG_UNUSED(dev);
+	item.t_rx = jit_now();
 	tp_toggle(tp_rx[item.bus]);
 	wcet_driver_seen(item.bus);
 	if (k_msgq_put(&rx_q, &item, K_NO_WAIT) != 0) {
@@ -174,6 +178,7 @@ static void dispatch_thread(void *p1, void *p2, void *p3)
 		s->valid = true;
 		atomic_inc(&canbus_stats.accepted[slot]);
 
+		cur_rx_t = item.t_rx;
 		if (relay_hook) {
 			relay_hook(f, item.bus);
 		}
@@ -183,12 +188,20 @@ static void dispatch_thread(void *p1, void *p2, void *p3)
 	}
 }
 
-static int queue_on(int bus, const struct can_frame *frame)
+uint32_t canbus_rx_cycles(void)
+{
+	return cur_rx_t;
+}
+
+static int queue_on(int bus, const struct can_frame *frame, uint32_t release, bool relayed)
 {
 	int ret;
 
 	tp_toggle(tp_tx[bus]);
 	ret = can_send(can_devs[bus], frame, K_NO_WAIT, tx_cb, (void *)(uintptr_t)bus);
+	if (ret == 0) {
+		jit_note(frame->id, bus, release, relayed);
+	}
 	if (ret == -EAGAIN) {
 		atomic_inc(&canbus_stats.bus[bus].tx_full); /* all 3 TX buffers busy */
 	} else if (ret < 0) {
@@ -198,6 +211,12 @@ static int queue_on(int bus, const struct can_frame *frame)
 }
 
 int canbus_send(uint32_t id, uint8_t payload[FRAME_DLC], bool include_degraded)
+{
+	return canbus_send_at(id, payload, include_degraded, 0);
+}
+
+int canbus_send_at(uint32_t id, uint8_t payload[FRAME_DLC], bool include_degraded,
+		   uint32_t release)
 {
 	int slot = slot_of(id);
 	struct can_frame frame = {.id = id, .dlc = FRAME_DLC};
@@ -222,7 +241,7 @@ int canbus_send(uint32_t id, uint8_t payload[FRAME_DLC], bool include_degraded)
 			atomic_inc(&canbus_stats.bus[bus].tx_skipped);
 			continue;
 		}
-		if (queue_on(bus, &frame) == 0) {
+		if (queue_on(bus, &frame, release, false) == 0) {
 			sent++;
 		}
 	}
@@ -231,6 +250,11 @@ int canbus_send(uint32_t id, uint8_t payload[FRAME_DLC], bool include_degraded)
 
 int canbus_forward(int bus, const struct can_frame *frame)
 {
+	return canbus_forward_at(bus, frame, 0);
+}
+
+int canbus_forward_at(int bus, const struct can_frame *frame, uint32_t release)
+{
 	if (!bus_running[bus]) {
 		return -ENETDOWN;
 	}
@@ -238,7 +262,7 @@ int canbus_forward(int bus, const struct can_frame *frame)
 		atomic_inc(&canbus_stats.bus[bus].tx_skipped);
 		return -ENETUNREACH;
 	}
-	return queue_on(bus, frame);
+	return queue_on(bus, frame, release, true);
 }
 
 void canbus_flush(int bus)

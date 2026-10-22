@@ -9,6 +9,7 @@
 #include "hb.h"
 #include "lab3_config.h"
 #include "node_config.h"
+#include "jitter.h"
 #include "tp.h"
 
 static struct k_spinlock lock; /* everything below */
@@ -29,7 +30,9 @@ static bool prev_alive[NUM_NODES];
 #define FAULT_QUEUE 4
 static struct {
 	uint8_t code, detail;
+	uint32_t t; /* jit_now() when the fault was recognised: J's start */
 } fault_q[FAULT_QUEUE];
+static uint32_t test_press_cyc; /* test button interrupt that set test_fault */
 static int fault_q_len;
 static uint32_t last_fault_sent_ms;
 
@@ -43,11 +46,12 @@ const char *zone_state_name(enum zone_state s)
 	return s <= ZONE_ISOLATED ? names[s] : "?";
 }
 
-static void queue_fault_locked(uint8_t code, uint8_t detail)
+static void queue_fault_locked(uint8_t code, uint8_t detail, uint32_t t)
 {
 	if (fault_q_len < FAULT_QUEUE) {
 		fault_q[fault_q_len].code = code;
 		fault_q[fault_q_len].detail = detail;
+		fault_q[fault_q_len].t = t;
 		fault_q_len++;
 	}
 }
@@ -59,6 +63,7 @@ void zone_update(void)
 	bool alive[NUM_NODES] = {0};
 	bool send = false;
 	uint8_t code = 0, detail = 0;
+	uint32_t fault_t = 0;
 
 	for (int n = 0; n < NUM_NODES; n++) {
 		alive[n] = n != NODE_SELF && hb_peer_alive(n);
@@ -80,7 +85,7 @@ void zone_update(void)
 			peer_bad = true;
 		}
 		if (booted && prev_alive[n] && !alive[n]) {
-			queue_fault_locked(FAULT_PEER_LOST, (uint8_t)n); /* informational */
+			queue_fault_locked(FAULT_PEER_LOST, (uint8_t)n, jit_now()); /* informational */
 		}
 		prev_alive[n] = alive[n];
 	}
@@ -93,7 +98,9 @@ void zone_update(void)
 		if (lf != FAULT_NONE && booted) {
 			queue_fault_locked(lf, (lf == FAULT_CTRL_RANGE || lf == FAULT_CTRL_MALFORMED)
 						       ? (uint8_t)(ID_CTRL & 0xFF)
-						       : 0);
+						       : 0,
+					  lf == FAULT_TEST_BUTTON && test_press_cyc ? test_press_cyc
+										   : jit_now());
 		}
 		if (lf != FAULT_NONE) {
 			last_fault = lf;
@@ -114,6 +121,7 @@ void zone_update(void)
 	if (fault_q_len > 0 && now - last_fault_sent_ms >= FAULT_MIN_GAP_MS) {
 		code = fault_q[0].code;
 		detail = fault_q[0].detail;
+		fault_t = fault_q[0].t;
 		for (int i = 1; i < fault_q_len; i++) {
 			fault_q[i - 1] = fault_q[i];
 		}
@@ -174,7 +182,7 @@ void zone_update(void)
 
 		p[1] = code;
 		p[2] = detail;
-		canbus_send(ID_FAULT(NODE_SELF), p, false);
+		canbus_send_at(ID_FAULT(NODE_SELF), p, false, fault_t);
 	}
 	k_mutex_unlock(&update_lock);
 }
@@ -227,13 +235,14 @@ void zone_ctrl_accepted(void)
 	k_spin_unlock(&lock, key);
 }
 
-void zone_test_button(void)
+void zone_test_button(uint32_t press_cyc)
 {
 	uint32_t now = k_uptime_get_32();
 	k_spinlock_key_t key = k_spin_lock(&lock);
 
 	if (!test_fault) {
 		test_fault = true; /* single press: local fail */
+		test_press_cyc = press_cyc;
 		exit_pending = false;
 	} else if (exit_pending && now - first_exit_ms <= DOUBLE_PRESS_MS) {
 		test_fault = false; /* double press: recover */

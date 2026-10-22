@@ -27,7 +27,6 @@
 		rl-gpios       = <&gpiob 4 GPIO_ACTIVE_HIGH>;	/* row 12: RL,       D5 / PB4, LED */
 		rr-gpios       = <&gpioc 8 GPIO_ACTIVE_HIGH>;	/* row 13: RR,       PC8 (morpho), LED */
 		err-gpios      = <&gpioc 6 GPIO_ACTIVE_HIGH>;	/* row 14: ERR,      PC6 (morpho), added */
-		target-chg-gpios = <&gpioc 10 GPIO_ACTIVE_HIGH>; /* row 15: TARGET_CHG, PC10 (morpho CN7-1), added */
 
 		/* L298 H-bridge (src/motor.c), Lab 2 pins */
 		hbridge-gpios = <&gpiob 12 GPIO_ACTIVE_HIGH>,	/* IN1, also DIR_A */

@@ -18,11 +18,6 @@
  *  of those writes toggles PWM_SET (motor.c), so PWM_SET marks every CTRL that
  *  reached the motor.
  *
- *  TARGET_CHG toggles when a CTRL changes the target speed (throttle step, or
- *  brake/release that moves it to/from 0), right after DRIVE has applied it.
- *  It ignores PID duty writes (those are PWM_SET), re-reads of the same CTRL
- *  on the poll wake-up, and the fail-safe drop to OFF (no message caused it).
- *
  *  PID (PRIO_PID, only with DRIVE_PID_ENABLED 1) runs every PID_PERIOD_MS:
  *  encoders -> Lab 2's feedforward + PI loop -> motor duty, while the mode is
  *  DRIVE. DRIVE then only sets the target and leaves the duty to PID.
@@ -44,7 +39,6 @@
 #include "hb.h"
 #include "lab3_config.h"
 #include "motor.h"
-#include "tp.h"
 #include "watchdog.h"
 
 /* 1 = Lab 2's closed-loop speed PID (needs the motors and encoders). */
@@ -166,8 +160,6 @@ static void set_mode_locked(enum drive_mode m)
 
 static void drive_thread(void *p1, void *p2, void *p3)
 {
-	float cmd_target = 0.0f; /* target set by the last CTRL acted on */
-
 	ARG_UNUSED(p1);
 	ARG_UNUSED(p2);
 	ARG_UNUSED(p3);
@@ -220,10 +212,6 @@ static void drive_thread(void *p1, void *p2, void *p3)
 						}
 #endif
 					}
-				}
-				if (target_mm_s != cmd_target) {
-					tp_toggle(TP_TARGET_CHG); /* this CTRL changed the target */
-					cmd_target = target_mm_s;
 				}
 			}
 		}

@@ -105,4 +105,4 @@ in `src/lab3_config.h` to skip). Then, once a second, with all three nodes up:
 
 ## Test points driven now
 
-All of this zone's rows: CAN_TX_A/B, CAN_RX_A/B, DEG_A/B, ERR, PWM_SET (every duty or brake set: once per CTRL that reaches the motor, plus the fail-safe brake), TARGET_CHG (a CTRL changed the target speed), PWM_OUT (left motor PWM), DIR_A (H-bridge IN1), and RL / RR (the rear blinkers).
+All of this zone's rows: CAN_TX_A/B, CAN_RX_A/B, DEG_A/B, ERR, PWM_SET (every duty or brake set: once per CTRL that reaches the motor, plus the fail-safe brake), PWM_OUT (left motor PWM), DIR_A (H-bridge IN1), and RL / RR (the rear blinkers).

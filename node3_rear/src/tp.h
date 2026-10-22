@@ -31,7 +31,6 @@ enum tp_id {
 	TP_PWM_SET,   /* motor duty written (N3) */
 	TP_DIR_A,     /* unused: on N3 the DIR_A row is the H-bridge IN1 pin itself */
 	TP_SRV,       /* servo duty set (N2): once per CTRL STEER acts on, and on re-centering */
-	TP_TARGET_CHG, /* a CTRL changed the target speed (N3): brake/throttle edge, no PID writes */
 	TP_COUNT
 };
 

@@ -13,8 +13,7 @@ second wire from that pin to the breadboard row.
 
 `ERR` has a row on every node (N1 row 9, N3 row 14) even though the handout
 table lists it only for N2: checkoff steps 1 and 9 expect ERR high on all
-three nodes. N3 row 15, `TARGET_CHG`, is also an addition: an end point for
-the brake/throttle chain that marks only the CTRL that changed the target.
+three nodes.
 
 ## Test-point breadboards
 
@@ -34,7 +33,6 @@ the brake/throttle chain that marks only the CTRL that changed the target.
 | 12 | - | | RELAY_TX | D8 / PA9 | RL (LED) | D5 / PB4 |
 | 13 | - | | ERR | D3 / PB3 | RR (LED) | PC8 (morpho) |
 | 14 | | | | | ERR *(added)* | PC6 (morpho) |
-| 15 | | | | | TARGET_CHG *(added)* | PC10 (morpho CN7-1) |
 
 "Morpho" pins are on the two long ST morpho headers; their names are printed
 next to the header on the Nucleo. The test button is the on-board blue USER
@@ -53,7 +51,6 @@ button B1 (PC13) on both Nucleos.
 | SRV | N2. Toggles every time the servo duty is set: once per CTRL STEER acts on (same angle or not) and when it re-centers. The servo PWM itself stays on D5 / PB4 (50 Hz, 0.5-2.5 ms) |
 | PWM_OUT | The left motor's enable PWM itself (10 kHz) |
 | PWM_SET | Toggles every time the motor is set: a duty (throttle; 0 = coast) or the brake, whether or not the output changed. DRIVE sets it once per CTRL it acts on and once when it drops to OFF, so with the PID compiled out that is one edge per CTRL that reaches the motor |
-| TARGET_CHG | N3 only. Toggles once when a CTRL changes the target speed (throttle step, or brake/release moving it to/from 0), right after DRIVE applies it. Not on PID writes, repeats of the same command, or the fail-safe drop to OFF |
 | DIR_A | H-bridge IN1: low for forward drive and for brake (Lab 2 wiring) |
 | FL, FR, RL, RR | The blinker LED outputs |
 

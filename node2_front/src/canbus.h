@@ -44,6 +44,11 @@ int canbus_send_at(uint32_t id, uint8_t payload[FRAME_DLC], bool include_degrade
 		   uint32_t release);
 
 /* Sends one raw Lab 5 frame without overwriting byte 0 with a Lab 3 sequence. */
+/*
+ * True while bulk Raft frames may use another TX buffer on this bus: at most
+ * RAFT_TX_MAX_INFLIGHT of the MCP2515's three, so Lab 3 frames keep one.
+ */
+bool canbus_raft_tx_ready(int bus);
 int canbus_send_raft(uint32_t id, const uint8_t payload[FRAME_DLC]);
 
 /* Queues a bit-identical copy of frame on one bus (the relay). */

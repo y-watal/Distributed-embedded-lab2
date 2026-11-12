@@ -97,6 +97,15 @@ static bool test_mode; /* COCKPIT_TEST_FD_* in use: no real interfaces */
 
 /* ---- Sockets ---- */
 static int can_fd[NUM_BUSES] = {-1, -1};
+/*
+ * Lab 5: Raft frames go out on their own TX-only socket per bus at a lower
+ * SO_PRIORITY. The interface qdisc (pfifo_fast) always dequeues the Lab 3
+ * band first, so CTRL and HB never wait behind queued Raft fragments; the
+ * mcp251x driver itself sends one frame at a time, in qdisc order.
+ */
+static int raft_fd[NUM_BUSES] = {-1, -1};
+#define SOCK_PRIO_LAB3 6 /* TC_PRIO_INTERACTIVE: pfifo_fast band 0 */
+#define SOCK_PRIO_RAFT 2 /* TC_PRIO_BULK: pfifo_fast band 2 */
 static int udp_fd = -1;
 
 /* ---- State shared between threads (lock) ---- */
@@ -223,7 +232,9 @@ static bool send_on_j(int bus, uint32_t id, const uint8_t data[FRAME_DLC], bool 
 	}
 	memcpy(f.data, data, FRAME_DLC);
 	tp_toggle(tp_tx[bus]);
-	if (write(can_fd[bus], &f, sizeof(f)) != (ssize_t)sizeof(f)) {
+	int fd = catalog_is_raft(id) ? raft_fd[bus] : can_fd[bus];
+
+	if (write(fd, &f, sizeof(f)) != (ssize_t)sizeof(f)) {
 		atomic_fetch_add(&tx_err[bus], 1); /* queue full (no ACK) or interface down */
 		return false;
 	}
@@ -338,9 +349,45 @@ static int can_open(const char *ifname)
 	can_err_mask_t err_mask = CAN_ERR_BUSOFF | CAN_ERR_CRTL | CAN_ERR_RESTARTED;
 	setsockopt(fd, SOL_CAN_RAW, CAN_RAW_ERR_FILTER, &err_mask, sizeof(err_mask));
 
+	int prio = SOCK_PRIO_LAB3;
+	setsockopt(fd, SOL_SOCKET, SO_PRIORITY, &prio, sizeof(prio));
+
 	/* Never block the brake path on a bus nobody ACKs. */
 	fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
 	return fd;
+}
+
+/*
+ * TX-only socket for Raft: receives nothing (empty filter list) and queues in
+ * the lowest pfifo_fast band. Loopback stays on so candump still shows the
+ * frames; can_rx drops our own Raft frames when they echo back.
+ */
+static int can_open_raft(const char *ifname)
+{
+	int fd = socket(PF_CAN, SOCK_RAW, CAN_RAW);
+	struct ifreq ifr = {0};
+	struct sockaddr_can addr = {0};
+	int prio = SOCK_PRIO_RAFT;
+
+	if (fd < 0) {
+		return -1;
+	}
+	snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", ifname);
+	if (ioctl(fd, SIOCGIFINDEX, &ifr) < 0) {
+		goto fail;
+	}
+	addr.can_family = AF_CAN;
+	addr.can_ifindex = ifr.ifr_ifindex;
+	if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0 ||
+	    setsockopt(fd, SOL_CAN_RAW, CAN_RAW_FILTER, NULL, 0) < 0 ||
+	    setsockopt(fd, SOL_SOCKET, SO_PRIORITY, &prio, sizeof(prio)) < 0) {
+		goto fail;
+	}
+	fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
+	return fd;
+fail:
+	close(fd);
+	return -1;
 }
 
 /*
@@ -590,7 +637,10 @@ static void *can_rx_thread(void *arg)
 				}
 				uint32_t id = f.can_id & CAN_SFF_MASK;
 				if (catalog_is_raft(id) && f.can_dlc == FRAME_DLC) {
-					raft_node_receive(id, f.data);
+					/* skip our own frames: Raft-socket echo, N2 relay */
+					if (catalog_sender(id) != NODE_N1) {
+						raft_node_receive(id, f.data);
+					}
 					continue;
 				}
 				int slot = catalog_slot(id);
@@ -1186,6 +1236,7 @@ int main(int argc, char **argv)
 
 		if (test_fd) {
 			can_fd[bus] = atoi(test_fd);
+			raft_fd[bus] = can_fd[bus];
 			test_mode = true;
 			fcntl(can_fd[bus], F_SETFL, fcntl(can_fd[bus], F_GETFL) | O_NONBLOCK);
 			continue;
@@ -1194,6 +1245,12 @@ int main(int argc, char **argv)
 		if (can_fd[bus] < 0) {
 			fprintf(stderr, "%s: %s (run ./can_up.sh first)\n", opt.ifname[bus], strerror(errno));
 			return 1;
+		}
+		raft_fd[bus] = can_open_raft(opt.ifname[bus]);
+		if (raft_fd[bus] < 0) {
+			fprintf(stderr, "%s: Raft socket: %s; sharing the Lab 3 socket\n",
+				opt.ifname[bus], strerror(errno));
+			raft_fd[bus] = can_fd[bus];
 		}
 	}
 

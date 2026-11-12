@@ -38,6 +38,23 @@ The bulk Raft block originally sat at `0x044`–`0x05A`, below the heartbeats.
 A retry storm of rejected client updates then delayed heartbeats past 44 ms
 and made the degraded flags flicker. Keeping the bulk block above `HB` means
 a burst of fragments can no longer win arbitration over a heartbeat.
+Arbitration only orders frames already waiting in different nodes. Inside one
+node the transmit path also keeps Raft from delaying Lab 3 frames:
+
+- **STM32:** the MCP2515 has three TX buffers and Lab 3 frames are sent with
+  `K_NO_WAIT`. Bulk Raft fragments may hold at most two
+  (`RAFT_TX_MAX_INFLIGHT`), counted in `canbus.c` from `can_send()` to the TX
+  callback, so a heartbeat, CTRL, or FAULT always finds one free. A fragment
+  waits up to 3 ms for room, then is skipped and Raft resends it. N2's relay
+  applies the same rule to relayed fragments and keeps forwarding CTRL and
+  FAULT while one waits (`raftfull` in its report counts skips). REF is one
+  frame and may wait for any buffer.
+- **Pi:** the `mcp251x` driver sends one frame at a time from the interface
+  queue. Raft uses its own TX-only socket with `SO_PRIORITY` 2 (pfifo_fast
+  band 2); the Lab 3 socket uses 6 (band 0), so CTRL and HB are dequeued
+  ahead of any waiting fragment. `can_up.sh` raises `txqueuelen` from 10 to
+  32 so a burst cannot make a CTRL or HB `write()` fail.
+
 Each STM32 still uses six MCP2515 receive filters: `BLINK` and `FORCE` share
 one (they differ only in bit 8), `REF` uses `0x040`/`0x7FC`, and the bulk
 block uses `0x140`/`0x7E0`. The future Raft sender must use its own bounded queue and must

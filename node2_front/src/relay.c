@@ -46,6 +46,43 @@ static void relay_hook(const struct can_frame *frame, int bus)
 	}
 }
 
+static void forward(const struct relay_item *item)
+{
+	int dst = item->src_bus == BUS_A ? BUS_B : BUS_A;
+
+	if (canbus_is_degraded(dst) || !canbus_bus_running(dst)) {
+		atomic_inc(&relay_stats.skipped);
+		return;
+	}
+	tp_toggle(TP_RELAY_TX);
+	if (canbus_forward_at(dst, &item->frame, item->t_rx) == 0) {
+		atomic_inc(&relay_stats.forwarded);
+	}
+}
+
+/*
+ * A bulk Raft fragment may not take the last MCP2515 TX buffer. Wait for
+ * room in short sleeps, forwarding any CTRL or FAULT that arrives meanwhile,
+ * so urgent frames never queue behind Raft. Returns false to skip it.
+ */
+static bool wait_raft_room(int dst)
+{
+	int64_t give_up = k_uptime_get() + RAFT_TX_WAIT_MS;
+	struct relay_item urgent;
+
+	while (!canbus_raft_tx_ready(dst)) {
+		while (k_msgq_get(&relay_urgent_q, &urgent, K_NO_WAIT) == 0) {
+			(void)k_sem_take(&relay_due, K_NO_WAIT); /* its count */
+			forward(&urgent);
+		}
+		if (k_uptime_get() >= give_up) {
+			return false;
+		}
+		k_sleep(K_USEC(100));
+	}
+	return true;
+}
+
 static void relay_thread(void *p1, void *p2, void *p3)
 {
 	struct relay_item item;
@@ -66,15 +103,15 @@ static void relay_thread(void *p1, void *p2, void *p3)
 		wcet_begin(&job);
 
 		int dst = item.src_bus == BUS_A ? BUS_B : BUS_A;
+		bool raft_bulk = catalog_is_raft(item.frame.id) &&
+				 (item.frame.id & ~3u) != ID_REF(0);
 
-		if (canbus_is_degraded(dst) || !canbus_bus_running(dst)) {
-			atomic_inc(&relay_stats.skipped);
+		if (raft_bulk && canbus_bus_running(dst) && !canbus_is_degraded(dst) &&
+		    !wait_raft_room(dst)) {
+			atomic_inc(&relay_stats.raft_full);
 			continue;
 		}
-		tp_toggle(TP_RELAY_TX);
-		if (canbus_forward_at(dst, &item.frame, item.t_rx) == 0) {
-			atomic_inc(&relay_stats.forwarded);
-		}
+		forward(&item);
 	}
 }
 

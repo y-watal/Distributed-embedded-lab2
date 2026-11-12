@@ -35,6 +35,9 @@ for SPI in spi0.0 spi0.1; do
         echo "!! $BUS: no interface after reset (probe failed): check that module's SPI wiring and power" >&2
         log; rc=1; continue
     fi
+    # Lab 5: a Raft burst (up to 6 fragments) plus CTRL/HB/REF must never
+    # fill the kernel TX queue and make a CTRL or HB write() fail; default is 10.
+    sudo ip link set "$IF" txqueuelen 32
     if ! sudo ip link set "$IF" up type can bitrate "$BITRATE" restart-ms 100; then
         echo "!! $BUS $IF would not come up" >&2
         log; rc=1; continue

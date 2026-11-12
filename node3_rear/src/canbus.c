@@ -45,6 +45,13 @@ struct canbus_stats canbus_stats;
 
 static bool bus_running[NUM_BUSES];
 static atomic_t bus_degraded[NUM_BUSES];
+/*
+ * Frames handed to the MCP2515 and not yet completed, per bus. The chip has
+ * three TX buffers; bulk Raft fragments may use at most RAFT_TX_MAX_INFLIGHT
+ * of them, so a heartbeat, CTRL, or FAULT (sent with K_NO_WAIT) always finds
+ * one free. REF is a single periodic frame and is not limited.
+ */
+static atomic_t tx_inflight[NUM_BUSES];
 static atomic_t bus_busoff[NUM_BUSES];
 
 static canbus_handler_t relay_hook;
@@ -135,7 +142,32 @@ static void tx_cb(const struct device *dev, int error, void *user_data)
 	int bus = (int)(uintptr_t)user_data;
 
 	ARG_UNUSED(dev);
+	if (atomic_dec(&tx_inflight[bus]) <= 0) {
+		atomic_set(&tx_inflight[bus], 0); /* never below zero after a flush */
+	}
 	atomic_inc(error == 0 ? &canbus_stats.bus[bus].tx_ok : &canbus_stats.bus[bus].tx_err);
+}
+
+/* Counts the buffer before can_send() so tx_cb can never run first. */
+static int send_counted(int bus, const struct can_frame *frame, k_timeout_t wait)
+{
+	atomic_inc(&tx_inflight[bus]);
+	int ret = can_send(can_devs[bus], frame, wait, tx_cb, (void *)(uintptr_t)bus);
+
+	if (ret < 0) {
+		atomic_dec(&tx_inflight[bus]);
+	}
+	return ret;
+}
+
+static bool is_raft_bulk(uint32_t id)
+{
+	return catalog_is_raft(id) && (id & ~3u) != ID_REF(0);
+}
+
+bool canbus_raft_tx_ready(int bus)
+{
+	return atomic_get(&tx_inflight[bus]) < RAFT_TX_MAX_INFLIGHT;
 }
 
 static void state_cb(const struct device *dev, enum can_state state, struct can_bus_err_cnt err,
@@ -239,7 +271,7 @@ static int queue_on(int bus, const struct can_frame *frame, uint32_t release, bo
 	int ret;
 
 	tp_toggle(tp_tx[bus]);
-	ret = can_send(can_devs[bus], frame, K_NO_WAIT, tx_cb, (void *)(uintptr_t)bus);
+	ret = send_counted(bus, frame, K_NO_WAIT);
 	if (ret == 0) {
 		jit_note(frame->id, bus, release, relayed);
 	}
@@ -269,9 +301,21 @@ int canbus_send_raft(uint32_t id, const uint8_t payload[FRAME_DLC])
 		if (!bus_running[bus] || atomic_get(&bus_degraded[bus])) {
 			continue;
 		}
+		if (is_raft_bulk(id)) {
+			/* Leave the last TX buffer to Lab 3 frames; Raft retries anyway. */
+			int64_t give_up = k_uptime_get() + RAFT_TX_WAIT_MS;
+
+			while (!canbus_raft_tx_ready(bus) && k_uptime_get() < give_up) {
+				k_sleep(K_USEC(100));
+			}
+			if (!canbus_raft_tx_ready(bus)) {
+				atomic_inc(&canbus_stats.bus[bus].tx_full);
+				continue;
+			}
+		}
 		tp_toggle(tp_tx[bus]);
-		int ret = can_send(can_devs[bus], &frame, K_MSEC(2), tx_cb,
-				   (void *)(uintptr_t)bus);
+		/* REF may wait briefly for a buffer, as before; bulk was checked above. */
+		int ret = send_counted(bus, &frame, is_raft_bulk(id) ? K_NO_WAIT : K_MSEC(2));
 		if (ret == 0) {
 			sent++;
 		} else if (ret == -EAGAIN) {
@@ -341,6 +385,7 @@ void canbus_flush(int bus)
 	/* can_stop() aborts pending transmissions; restart keeps the filters. */
 	k_mutex_lock(&flush_lock, K_FOREVER);
 	can_stop(can_devs[bus]);
+	atomic_set(&tx_inflight[bus], 0); /* stop aborted everything pending */
 	can_start(can_devs[bus]);
 	k_mutex_unlock(&flush_lock);
 }

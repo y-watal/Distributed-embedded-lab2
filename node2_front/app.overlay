@@ -82,8 +82,14 @@
 	can_a: can@0 {
 		compatible = "microchip,mcp2515";
 		reg = <0>;
-		/* 4 MHz: at 1 MHz, back-to-back frames were being lost on a node with one bus unplugged. MCP2515 max is 10 MHz. */
-		spi-max-frequency = <4000000>;
+		/*
+		 * Requests 8 MHz; SPI1 runs from the 84 MHz APB2 clock with power-of-two
+		 * dividers, so the real clock is 84/16 = 5.25 MHz (4 MHz gave 2.625).
+		 * Lab 5: N2 relays ~190 frames/s over this shared bus; at 2.625 MHz its
+		 * TX completions fell behind and heartbeats found all 3 TX buffers busy.
+		 * History: 1 MHz lost back-to-back frames. MCP2515 max is 10 MHz.
+		 */
+		spi-max-frequency = <8000000>;
 		int-gpios = <&gpioa 10 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
 		osc-freq = <16000000>;
 		bitrate = <500000>;
@@ -93,7 +99,7 @@
 	can_b: can@1 {
 		compatible = "microchip,mcp2515";
 		reg = <1>;
-		spi-max-frequency = <4000000>;
+		spi-max-frequency = <8000000>;
 		int-gpios = <&gpiob 5 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
 		osc-freq = <16000000>;
 		bitrate = <500000>;

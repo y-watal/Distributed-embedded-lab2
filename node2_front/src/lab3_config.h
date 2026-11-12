@@ -89,6 +89,13 @@
  * (with the old 2 ms wait for any buffer) and counted as "late". Skipping
  * fragments instead lost every multi-frame message (N2/N3 split, term 885).
  */
+/*
+ * Own heartbeat waits up to this long for an MCP2515 TX buffer instead of
+ * K_NO_WAIT (the driver frees a buffer slightly after the TX callback).
+ * Adds at most this much heartbeat jitter, far inside HB_MAX_INTERVAL_MS.
+ */
+#define HB_TX_WAIT_US           500
+
 #define RAFT_TX_MAX_INFLIGHT    2
 #define RAFT_TX_RESERVE_WAIT_US 1000
 

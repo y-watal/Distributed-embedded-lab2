@@ -291,12 +291,13 @@ uint32_t canbus_rx_cycles(void)
 	return cur_rx_t;
 }
 
-static int queue_on(int bus, const struct can_frame *frame, uint32_t release, bool relayed)
+static int queue_on(int bus, const struct can_frame *frame, uint32_t release, bool relayed,
+		    k_timeout_t wait)
 {
 	int ret;
 
 	tp_toggle(tp_tx[bus]);
-	ret = send_counted(bus, frame, K_NO_WAIT);
+	ret = send_counted(bus, frame, wait);
 	if (ret == 0) {
 		jit_note(frame->id, bus, release, relayed);
 	}
@@ -372,7 +373,16 @@ int canbus_send_at(uint32_t id, uint8_t payload[FRAME_DLC], bool include_degrade
 			atomic_inc(&canbus_stats.bus[bus].tx_skipped);
 			continue;
 		}
-		if (queue_on(bus, &frame, release, false) == 0) {
+		/*
+		 * Our heartbeat may wait briefly for a TX buffer: the driver frees a
+		 * buffer a little after its TX callback, so K_NO_WAIT sometimes found
+		 * none free and the heartbeat was lost. Not on a degraded bus, where
+		 * unACKed heartbeats can hold every buffer and waiting cannot help.
+		 */
+		k_timeout_t wait = catalog_is_hb(id) && !atomic_get(&bus_degraded[bus]) ?
+					   K_USEC(HB_TX_WAIT_US) : K_NO_WAIT;
+
+		if (queue_on(bus, &frame, release, false, wait) == 0) {
 			sent++;
 		}
 	}
@@ -393,7 +403,7 @@ int canbus_forward_at(int bus, const struct can_frame *frame, uint32_t release)
 		atomic_inc(&canbus_stats.bus[bus].tx_skipped);
 		return -ENETUNREACH;
 	}
-	return queue_on(bus, frame, release, true);
+	return queue_on(bus, frame, release, true, K_NO_WAIT);
 }
 
 void canbus_flush(int bus)

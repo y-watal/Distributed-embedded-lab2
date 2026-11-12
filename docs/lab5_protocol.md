@@ -51,7 +51,12 @@ node the transmit path also keeps Raft from delaying Lab 3 frames:
   message lost a fragment, and N2 and N3 split (N2 candidate at term 885,
   N3 leader at term 351). N2's relay applies the same rule to relayed
   fragments and keeps forwarding CTRL and FAULT while one waits (`raftlate`).
-  REF is one frame and may wait for any buffer. Each bus line of the report
+  REF is one frame and may wait for any buffer. The reserve alone did not
+  stop heartbeat losses: the Zephyr MCP2515 driver frees a TX buffer slightly
+  after it calls the TX callback, so a `K_NO_WAIT` send could find none free
+  while at most two frames were counted in flight. A node's own heartbeat
+  therefore waits up to 0.5 ms for a buffer (`HB_TX_WAIT_US`) on a bus that is
+  not degraded; CTRL, FAULT, and relayed frames stay `K_NO_WAIT`. Each bus line of the report
   prints `tx q=` (frames `can_send()` accepted, which should equal `ok` +
   `err`) and `infl N max M late L` (frames in flight now, the most seen, and
   late Raft sends) to show whether the in-flight count tracks the hardware.

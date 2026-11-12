@@ -56,7 +56,7 @@ static void raft_thread(void *p1, void *p2, void *p3)
 					   now, body, &len)) {
 			raft_agent_receive(&agent, work.frame.id, body, len, now);
 		} else if (got == 0 && work.kind == 1) {
-			raft_client_report(&agent, work.event);
+			raft_client_observe(&agent, work.event, now);
 		}
 		raft_agent_poll(&agent, now);
 		k_mutex_unlock(&raft_lock);

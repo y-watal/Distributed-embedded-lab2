@@ -97,7 +97,7 @@ static void *raft_worker(void *arg)
 		    raft_transport_receive(&transport, work.id, work.frame, now, body, &len)) {
 			raft_agent_receive(&agent, work.id, body, len, now);
 		} else if (got && work.kind == 1) {
-			raft_client_report(&agent, work.event);
+			raft_client_observe(&agent, work.event, now);
 		}
 		raft_agent_poll(&agent, now);
 		pthread_mutex_unlock(&lock);

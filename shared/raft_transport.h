@@ -4,7 +4,6 @@
 #include "raft_wire.h"
 
 #define RAFT_REASSEMBLY_TIMEOUT_MS 250u
-#define RAFT_ID_SPAN (ID_RAFT_LAST - ID_RAFT_FIRST + 1)
 
 struct raft_rx_transfer {
 	uint8_t transfer_id;
@@ -17,8 +16,8 @@ struct raft_rx_transfer {
 };
 
 struct raft_transport {
-	struct raft_rx_transfer rx[RAFT_ID_SPAN];
-	uint8_t next_transfer[RAFT_ID_SPAN];
+	struct raft_rx_transfer rx[RAFT_ID_SLOTS];
+	uint8_t next_transfer[RAFT_ID_SLOTS];
 };
 
 typedef bool (*raft_emit_frame_fn)(void *ctx, uint32_t id, const uint8_t frame[FRAME_DLC]);

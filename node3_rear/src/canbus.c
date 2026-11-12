@@ -35,9 +35,10 @@ static const struct can_filter catalog_filters[] = {
 	{.id = ID_CTRL, .mask = CAN_STD_ID_MASK},
 	{.id = ID_FAULT(0), .mask = 0x7FC}, /* 0x020-0x023 */
 	{.id = ID_HB(0), .mask = 0x7FC},    /* 0x100-0x103 */
-	{.id = ID_BLINK, .mask = CAN_STD_ID_MASK},
-	{.id = ID_FORCE, .mask = CAN_STD_ID_MASK},
-	{.id = ID_RAFT_FIRST, .mask = 0x7E0}, /* all 0x040-0x05f Lab 5 IDs */
+	/* BLINK 0x200 and FORCE 0x300 differ only in bit 8: one filter keeps us at six. */
+	{.id = ID_BLINK, .mask = CAN_STD_ID_MASK & ~(ID_BLINK ^ ID_FORCE)},
+	{.id = ID_REF(0), .mask = RAFT_REF_FILTER_MASK},          /* 0x040-0x043 */
+	{.id = ID_RAFT_BULK_BASE, .mask = RAFT_BULK_FILTER_MASK}, /* 0x140-0x15F */
 };
 
 struct canbus_stats canbus_stats;

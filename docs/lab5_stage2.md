@@ -37,9 +37,9 @@ Build and run the Pi program and flash both STM32 images from the `lab5`
 branch. Once the two CAN interfaces and three nodes are up:
 
 1. Each console should report term 1, leader N1, and its own role.
-2. `candump -c any` on the Pi should show client updates (`0x055`, `0x056`),
-   leader appends (`0x04c`), follower acknowledgements (`0x051`, `0x052`),
-   and client replies (`0x058`). These arrive as multiple frames per message.
+2. `candump -c any` on the Pi should show client updates (`0x151`, `0x152`),
+   leader appends (`0x148`), follower acknowledgements (`0x14d`, `0x14e`),
+   and client replies (`0x154`). These arrive as multiple frames per message.
 3. Each console should show its log and committed indexes rising and its
    network states converging as startup node and link reports commit.
 4. Pull one CAN link and restore it. The owner should report its link down and

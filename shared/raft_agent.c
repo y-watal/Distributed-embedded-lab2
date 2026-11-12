@@ -56,6 +56,44 @@ static bool event_already_applied(const struct raft_network *n, const struct raf
 	return false;
 }
 
+/* Debounce subject for cockpit, node, and link events; -1 for anything else. */
+static int event_subject(const struct raft_event *e, bool *up)
+{
+	switch (e->type) {
+	case RAFT_EVENT_COCKPIT_OK:
+	case RAFT_EVENT_COCKPIT_ERROR:
+		*up = e->type == RAFT_EVENT_COCKPIT_OK;
+		return 0;
+	case RAFT_EVENT_NODE_UP:
+	case RAFT_EVENT_NODE_DOWN:
+		*up = e->type == RAFT_EVENT_NODE_UP;
+		return e->node < NUM_NODES ? 1 + e->node : -1;
+	case RAFT_EVENT_CANLINK_UP:
+	case RAFT_EVENT_CANLINK_DOWN:
+		*up = e->type == RAFT_EVENT_CANLINK_UP;
+		return e->node < NUM_NODES && e->bus < 2 ?
+		       1 + NUM_NODES + e->node * 2 + e->bus : -1;
+	default:
+		return -1;
+	}
+}
+
+static struct raft_event subject_event(int subject, bool up)
+{
+	if (subject == 0) {
+		return (struct raft_event){up ? RAFT_EVENT_COCKPIT_OK : RAFT_EVENT_COCKPIT_ERROR,
+					   NODE_N1, RAFT_BUS_NONE, 0};
+	}
+	if (subject <= NUM_NODES) {
+		return (struct raft_event){up ? RAFT_EVENT_NODE_UP : RAFT_EVENT_NODE_DOWN,
+					   (uint8_t)(subject - 1), RAFT_BUS_NONE, 0};
+	}
+	int link = subject - 1 - NUM_NODES;
+
+	return (struct raft_event){up ? RAFT_EVENT_CANLINK_UP : RAFT_EVENT_CANLINK_DOWN,
+				   (uint8_t)(link / 2), (uint8_t)(link % 2), 0};
+}
+
 static void apply_committed(struct raft_agent *a)
 {
 	while (a->applied_index < a->commit_index &&
@@ -79,6 +117,24 @@ static void reply_client(struct raft_agent *a, uint8_t target, uint32_t request_
 
 	raft_client_reply_encode(&reply, body);
 	send_body(a, ID_CLIENT_REPLY(a->self), body, sizeof(body));
+}
+
+/* The leader's own client is answered in place instead of over CAN. */
+static void client_result(struct raft_agent *a, uint8_t client, uint32_t request_id,
+			  enum raft_client_status status, uint32_t index)
+{
+	if (client != a->self) {
+		reply_client(a, client, request_id, status, index);
+		return;
+	}
+	if (!a->active_request || request_id != a->active_request_id) {
+		return;
+	}
+	if (status == RAFT_CLIENT_COMMITTED) {
+		a->active_request = false;
+	} else if (status == RAFT_CLIENT_REJECTED) {
+		a->client_retry_ms = RAFT_CLIENT_REJECT_BACKOFF_MS;
+	}
 }
 
 static void send_append(struct raft_agent *a, uint8_t target, uint32_t index)
@@ -168,27 +224,24 @@ static void handle_client_update(struct raft_agent *a, uint8_t sender,
 	}
 	if (a->last_client_id[sender] == m->request_id &&
 	    a->last_client_index[sender] != 0) {
-		reply_client(a, sender, m->request_id, RAFT_CLIENT_COMMITTED,
-			     a->last_client_index[sender]);
+		client_result(a, sender, m->request_id, RAFT_CLIENT_COMMITTED,
+			      a->last_client_index[sender]);
 		return;
 	}
 	if (event_already_applied(&a->network, &m->event)) {
 		a->last_client_id[sender] = m->request_id;
 		a->last_client_index[sender] = a->commit_index;
-		if (sender == a->self) {
-			a->active_request = false;
-		} else {
-			reply_client(a, sender, m->request_id, RAFT_CLIENT_COMMITTED,
-				     a->commit_index);
-		}
+		client_result(a, sender, m->request_id, RAFT_CLIENT_COMMITTED,
+			      a->commit_index);
 		return;
 	}
-	if (a->pending_index && a->pending_client == sender &&
-	    a->pending_request_id == m->request_id) {
+	/* Another entry is in flight: stay silent, the client resends shortly. */
+	if (a->pending_index) {
 		return;
 	}
-	if (a->pending_index || a->last_index >= RAFT_WORKING_LOG_ENTRIES) {
-		reply_client(a, sender, m->request_id, RAFT_CLIENT_REJECTED, 0);
+	/* Log full: REJECTED makes the client wait RAFT_CLIENT_REJECT_BACKOFF_MS. */
+	if (a->last_index >= RAFT_WORKING_LOG_ENTRIES) {
+		client_result(a, sender, m->request_id, RAFT_CLIENT_REJECTED, 0);
 		return;
 	}
 	a->log[a->last_index].term = a->term;
@@ -222,6 +275,21 @@ void raft_agent_init(struct raft_agent *a, uint8_t self, raft_send_fn send, void
 
 bool raft_client_report(struct raft_agent *a, struct raft_event event)
 {
+	bool up;
+	int subject = event_subject(&event, &up);
+
+	if (subject >= 0) {
+		for (uint8_t i = 0; i < a->queue_count; i++) {
+			struct raft_event *q =
+				&a->queued[(a->queue_head + i) % RAFT_CLIENT_QUEUE_LEN];
+			bool q_up;
+
+			if (event_subject(q, &q_up) == subject) {
+				*q = event; /* newest state wins */
+				return true;
+			}
+		}
+	}
 	if (a->queue_count == RAFT_CLIENT_QUEUE_LEN) {
 		return false;
 	}
@@ -229,6 +297,42 @@ bool raft_client_report(struct raft_agent *a, struct raft_event event)
 	a->queued[tail] = event;
 	a->queue_count++;
 	return true;
+}
+
+bool raft_client_observe(struct raft_agent *a, struct raft_event event, uint32_t now_ms)
+{
+	bool up;
+	int subject = event_subject(&event, &up);
+
+	if (subject < 0) {
+		return raft_client_report(a, event);
+	}
+	struct raft_observation *o = &a->obs[subject];
+
+	if (!o->seen || o->up != up) {
+		o->seen = true;
+		o->up = up;
+		o->since_ms = now_ms;
+	}
+	return true;
+}
+
+/* Queue each observation that has held long enough and differs from the last report. */
+static void client_debounce(struct raft_agent *a, uint32_t now_ms)
+{
+	for (int s = 0; s < RAFT_OBS_SUBJECTS; s++) {
+		struct raft_observation *o = &a->obs[s];
+		uint32_t hold = o->up ? RAFT_REPORT_UP_HOLD_MS : RAFT_REPORT_DOWN_HOLD_MS;
+
+		if (!o->seen || (o->reported && o->reported_up == o->up) ||
+		    (uint32_t)(now_ms - o->since_ms) < hold) {
+			continue;
+		}
+		if (raft_client_report(a, subject_event(s, o->up))) {
+			o->reported = true;
+			o->reported_up = o->up;
+		}
+	}
 }
 
 void raft_client_get_network(const struct raft_agent *a, struct raft_network *out)
@@ -348,12 +452,8 @@ static void handle_append_ack(struct raft_agent *a, uint8_t sender,
 	apply_committed(a);
 	a->last_client_id[a->pending_client] = a->pending_request_id;
 	a->last_client_index[a->pending_client] = a->commit_index;
-	if (a->pending_client == a->self) {
-		a->active_request = false;
-	} else {
-		reply_client(a, a->pending_client, a->pending_request_id,
-			     RAFT_CLIENT_COMMITTED, a->commit_index);
-	}
+	client_result(a, a->pending_client, a->pending_request_id,
+		      RAFT_CLIENT_COMMITTED, a->commit_index);
 	a->pending_index = 0;
 	send_empty_append(a);
 }
@@ -388,6 +488,10 @@ void raft_agent_receive(struct raft_agent *a, uint32_t id, const uint8_t *body,
 			} else if (m.status == RAFT_CLIENT_REDIRECT && m.leader < NUM_NODES) {
 				a->leader = (int8_t)m.leader;
 				a->last_client_send_ms = 0;
+				a->client_retry_ms = RAFT_CLIENT_RETRY_MS;
+			} else if (m.status == RAFT_CLIENT_REJECTED) {
+				a->last_client_send_ms = now_ms ? now_ms : 1;
+				a->client_retry_ms = RAFT_CLIENT_REJECT_BACKOFF_MS;
 			}
 		}
 	} else if (kind == ID_APPEND(0) &&
@@ -471,6 +575,7 @@ void raft_agent_poll(struct raft_agent *a, uint32_t now_ms)
 			a->empty_append_sent = true;
 		}
 	}
+	client_debounce(a, now_ms);
 	if (!a->active_request && a->queue_count) {
 		a->active_event = a->queued[a->queue_head];
 		a->queue_head = (uint8_t)((a->queue_head + 1) % RAFT_CLIENT_QUEUE_LEN);
@@ -478,9 +583,11 @@ void raft_agent_poll(struct raft_agent *a, uint32_t now_ms)
 		a->active_request = true;
 		a->active_request_id = ++a->next_request_id;
 		a->last_client_send_ms = 0;
+		a->client_retry_ms = RAFT_CLIENT_RETRY_MS;
 	}
 	if (a->active_request &&
-	    (a->last_client_send_ms == 0 || now_ms - a->last_client_send_ms >= 100)) {
+	    (a->last_client_send_ms == 0 ||
+	     now_ms - a->last_client_send_ms >= a->client_retry_ms)) {
 		struct raft_client_update m = {
 			.target = a->leader < 0 ? RAFT_TARGET_ALL : (uint8_t)a->leader,
 			.request_id = a->active_request_id,

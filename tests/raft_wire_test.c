@@ -132,6 +132,32 @@ int main(void)
 	assert(catalog_is_raft(ID_REF(NODE_N1)));
 	assert(catalog_sender(ID_APPEND(NODE_N3)) == NODE_N3);
 	assert(!catalog_is_raft(0x043));
+	/* Arbitration order: CTRL/FAULT < REF < HB < Raft bulk < BLINK. */
+	assert(ID_REF(2) < ID_HB(0) && ID_HB(2) < ID_REQ_VOTE(0));
+	assert(ID_CLIENT_REPLY(2) < ID_BLINK);
+	assert(!catalog_is_raft(ID_HB(0)) && !catalog_is_raft(ID_BLINK));
+	assert(!catalog_is_raft(ID_REQ_VOTE(0) + 3) && !catalog_is_raft(0x044));
+	{
+		const uint32_t ids[] = {ID_REF(0), ID_REQ_VOTE(0), ID_VOTE_REPLY(0), ID_APPEND(0),
+					ID_APPEND_ACK(0), ID_CLIENT_UPDATE(0), ID_CLIENT_REPLY(0)};
+		bool used[RAFT_ID_SLOTS] = {false};
+
+		for (size_t k = 0; k < sizeof(ids) / sizeof(ids[0]); k++) {
+			for (uint32_t n = 0; n < NUM_NODES; n++) {
+				int slot = raft_id_slot(ids[k] + n);
+
+				assert(catalog_is_raft(ids[k] + n));
+				assert(catalog_sender(ids[k] + n) == (int)n);
+				assert(slot >= 0 && slot < RAFT_ID_SLOTS && !used[slot]);
+				used[slot] = true;
+			}
+			/* Each block fits the hardware filters. */
+			uint32_t base = ids[k] == ID_REF(0) ? ID_REF(0) : ID_RAFT_BULK_BASE;
+			uint32_t mask = ids[k] == ID_REF(0) ? RAFT_REF_FILTER_MASK :
+							      RAFT_BULK_FILTER_MASK;
+			assert((ids[k] & mask) == (base & mask));
+		}
+	}
 	test_ref();
 	test_vote();
 	test_append_and_fragments();

@@ -17,16 +17,30 @@ The fourth ID in each block is unused. A leader can therefore be any node.
 | IDs for N1, N2, N3 | Message | Purpose |
 |---|---|---|
 | `0x040`–`0x042` | `REF` | Leader presence and master time every 20 ms |
-| `0x044`–`0x046` | `REQ_VOTE` | Candidate requests a vote |
-| `0x048`–`0x04A` | `VOTE_REPLY` | Voter grants or denies a candidate |
-| `0x04C`–`0x04E` | `APPEND` | Leader heartbeat or one log entry |
-| `0x050`–`0x052` | `APPEND_ACK` | Follower confirms or rejects an append |
-| `0x054`–`0x056` | `CLIENT_UPDATE` | Client reports a local membership or application event |
-| `0x058`–`0x05A` | `CLIENT_REPLY` | Leader confirms a commit or follower redirects |
+| `0x140`–`0x142` | `REQ_VOTE` | Candidate requests a vote |
+| `0x144`–`0x146` | `VOTE_REPLY` | Voter grants or denies a candidate |
+| `0x148`–`0x14A` | `APPEND` | Leader heartbeat or one log entry |
+| `0x14C`–`0x14E` | `APPEND_ACK` | Follower confirms or rejects an append |
+| `0x150`–`0x152` | `CLIENT_UPDATE` | Client reports a local membership or application event |
+| `0x154`–`0x156` | `CLIENT_REPLY` | Leader confirms a commit or follower redirects |
 
-`CTRL` remains at `0x010` and `FAULT_Nx` remains at `0x020`–`0x022`, so
-simultaneously queued driving and fault frames win CAN arbitration over the
-new messages. The future Raft sender must use its own bounded queue and must
+A lower CAN ID wins arbitration, so the IDs follow deadlines:
+
+| Priority | IDs | Messages | Reason |
+|---|---|---|---|
+| 1 | `0x010`–`0x022` | `CTRL`, `FAULT_Nx` | Brake within 100 ms |
+| 2 | `0x040`–`0x042` | `REF` | One frame at 50 Hz; arbitration delay is time-sync error |
+| 3 | `0x100`–`0x102` | `HB_Nx` | 44 ms degraded-bus deadline |
+| 4 | `0x140`–`0x156` | Votes, appends, client messages | Fragmented, retried after 100 ms or more |
+| 5 | `0x200`, `0x300` | `BLINK`, `FORCE` | Unchanged from Lab 3 |
+
+The bulk Raft block originally sat at `0x044`–`0x05A`, below the heartbeats.
+A retry storm of rejected client updates then delayed heartbeats past 44 ms
+and made the degraded flags flicker. Keeping the bulk block above `HB` means
+a burst of fragments can no longer win arbitration over a heartbeat.
+Each STM32 still uses six MCP2515 receive filters: `BLINK` and `FORCE` share
+one (they differ only in bit 8), `REF` uses `0x040`/`0x7FC`, and the bulk
+block uses `0x140`/`0x7E0`. The future Raft sender must use its own bounded queue and must
 never block the Pi's wheel-to-`CTRL` path. Arbitration does not preempt a frame
 that is already on the wire.
 
@@ -104,6 +118,24 @@ Each event is four bytes: `type`, `node`, `bus`, `value`. The defined types are
 `CANLINK_DOWN`, and `APPLICATION`. Node is 0–2. Bus is 0 for A, 1 for B,
 or `0xFF` when the event is not about a link. Value is zero except for an
 application event code. For `APPLICATION`, node is the originating node.
+
+## Client pacing
+
+The Lab 3 monitors still flip `DEG` and peer-lost immediately for local
+behaviour. What goes into the replicated log is debounced in
+`raft_client_observe()`:
+
+- A cockpit error, node loss, or link loss is reported only after it has
+  persisted for 50 ms beyond detection (`RAFT_REPORT_DOWN_HOLD_MS`). With the
+  44 ms `DEG` threshold, a link is logged down after about 94 ms of silence.
+- A recovery is reported after 100 ms of stable state (`RAFT_REPORT_UP_HOLD_MS`).
+- A flicker shorter than the hold is never logged.
+- A newer state for the same cockpit, node, or link replaces a queued one.
+- An unanswered `CLIENT_UPDATE` is resent every 100 ms. After `REJECTED`
+  (working log full) the client waits 1 s before resending.
+- While another entry is in flight, the leader does not answer; the client's
+  normal resend covers it. The leader's own client is answered in place,
+  never over CAN.
 
 `MEMBER` and `EVENT` are log or console labels used by the checkoff, not
 additional CAN IDs in this design. A client sends the four-byte event in

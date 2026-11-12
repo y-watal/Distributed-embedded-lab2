@@ -28,6 +28,16 @@ struct raft_network {
 	bool cockpit_known;
 };
 
+/* One debounced subject: cockpit, a node, or one node's link to one bus. */
+#define RAFT_OBS_SUBJECTS (1 + NUM_NODES + NUM_NODES * 2)
+struct raft_observation {
+	bool seen;        /* at least one observation arrived */
+	bool up;          /* latest raw observation */
+	bool reported;    /* a debounced value has been queued */
+	bool reported_up; /* that value */
+	uint32_t since_ms;
+};
+
 /* Sends one complete logical body. The platform adapter fragments it for CAN. */
 typedef bool (*raft_send_fn)(void *ctx, uint32_t can_id, const uint8_t *body, uint8_t len);
 
@@ -58,6 +68,8 @@ struct raft_agent {
 	struct raft_event active_event;
 	bool active_request;
 	uint32_t last_client_send_ms;
+	uint32_t client_retry_ms;
+	struct raft_observation obs[RAFT_OBS_SUBJECTS];
 	uint32_t pending_index;
 	uint8_t pending_client;
 	uint32_t pending_request_id;
@@ -78,8 +90,20 @@ void raft_agent_init(struct raft_agent *a, uint8_t self, raft_send_fn send, void
 void raft_agent_receive(struct raft_agent *a, uint32_t can_id, const uint8_t *body,
 			uint8_t len, uint32_t now_ms);
 
-/* Queue local observations without blocking a CAN receive or actuator thread. */
+/*
+ * Queue an event for the leader now. A queued event about the same cockpit,
+ * node, or link is replaced rather than queued behind, so only the latest
+ * state is sent.
+ */
 bool raft_client_report(struct raft_agent *a, struct raft_event event);
+
+/*
+ * Record a local observation (an edge from the Lab 3 monitors). Cockpit,
+ * node, and link observations are reported only after holding for
+ * RAFT_REPORT_DOWN_HOLD_MS or RAFT_REPORT_UP_HOLD_MS; a flicker shorter than
+ * that is never logged. Other events go straight to raft_client_report().
+ */
+bool raft_client_observe(struct raft_agent *a, struct raft_event event, uint32_t now_ms);
 
 /* Drive client retries and pending replication from a low-priority worker. */
 void raft_agent_poll(struct raft_agent *a, uint32_t now_ms);

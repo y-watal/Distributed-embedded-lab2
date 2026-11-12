@@ -12,7 +12,7 @@ bool raft_transport_send(struct raft_transport *t, uint32_t id, const uint8_t *b
 	if ((id & ~3u) == ID_REF(0)) {
 		return emit(emit_ctx, id, body);
 	}
-	uint8_t transfer_id = ++t->next_transfer[id - ID_RAFT_FIRST];
+	uint8_t transfer_id = ++t->next_transfer[raft_id_slot(id)];
 	for (uint8_t fragment = 0; fragment < raft_fragment_count(len); fragment++) {
 		uint8_t frame[FRAME_DLC];
 
@@ -39,7 +39,7 @@ bool raft_transport_receive(struct raft_transport *t, uint32_t id,
 	if (!raft_fragment_valid(frame)) {
 		return false;
 	}
-	struct raft_rx_transfer *r = &t->rx[id - ID_RAFT_FIRST];
+	struct raft_rx_transfer *r = &t->rx[raft_id_slot(id)];
 	uint8_t transfer_id = frame[0];
 	uint8_t fragment = frame[1];
 	uint8_t body_len = frame[2];

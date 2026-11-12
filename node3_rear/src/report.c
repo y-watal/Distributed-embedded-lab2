@@ -105,11 +105,11 @@ static void report_thread(void *p1, void *p2, void *p3)
 		printk(" | dup %ld echo %ld rxdrop %ld", (long)atomic_clear(&s->duplicates),
 		       (long)atomic_clear(&s->own_echo), (long)atomic_clear(&s->rx_dropped));
 		if (RELAY_ENABLED) {
-			printk(" | relay %ld skip %ld drop %ld raftfull %ld",
+			printk(" | relay %ld skip %ld drop %ld raftlate %ld",
 			       (long)atomic_clear(&relay_stats.forwarded),
 			       (long)atomic_clear(&relay_stats.skipped),
 			       (long)atomic_clear(&relay_stats.dropped),
-			       (long)atomic_clear(&relay_stats.raft_full));
+			       (long)atomic_clear(&relay_stats.raft_late));
 		}
 		printk("\n");
 
@@ -133,11 +133,14 @@ static void report_thread(void *p1, void *p2, void *p3)
 			ovr = ovr_now - ovr_prev[bus];
 			ovr_prev[bus] = ovr_now;
 #endif
-			printk("  %c: %s tec=%u rec=%u ovr=%u DEG %d | tx ok=%ld err=%ld full=%ld skip=%ld | rx:",
+			printk("  %c: %s tec=%u rec=%u ovr=%u DEG %d | tx q=%ld ok=%ld err=%ld full=%ld skip=%ld"
+			       " | infl %ld max %ld late %ld | rx:",
 			       'A' + bus, can_state_name(st), err.tx_err_cnt, err.rx_err_cnt, ovr,
-			       hb_bus_degraded(bus), (long)atomic_clear(&b->tx_ok),
+			       hb_bus_degraded(bus), (long)atomic_clear(&b->tx_queued),
+			       (long)atomic_clear(&b->tx_ok),
 			       (long)atomic_clear(&b->tx_err), (long)atomic_clear(&b->tx_full),
-			       (long)atomic_clear(&b->tx_skipped));
+			       (long)atomic_clear(&b->tx_skipped), canbus_tx_inflight(bus),
+			       (long)atomic_clear(&b->infl_max), (long)atomic_clear(&b->raft_late));
 			print_counts(b->rx, NULL);
 			printk("\n");
 		}

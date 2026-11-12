@@ -151,11 +151,18 @@ static void tx_cb(const struct device *dev, int error, void *user_data)
 /* Counts the buffer before can_send() so tx_cb can never run first. */
 static int send_counted(int bus, const struct can_frame *frame, k_timeout_t wait)
 {
-	atomic_inc(&tx_inflight[bus]);
+	struct canbus_bus_stats *b = &canbus_stats.bus[bus];
+	atomic_val_t now = atomic_inc(&tx_inflight[bus]) + 1;
+
+	if (now > atomic_get(&b->infl_max)) {
+		atomic_set(&b->infl_max, now);
+	}
 	int ret = can_send(can_devs[bus], frame, wait, tx_cb, (void *)(uintptr_t)bus);
 
 	if (ret < 0) {
 		atomic_dec(&tx_inflight[bus]);
+	} else {
+		atomic_inc(&b->tx_queued);
 	}
 	return ret;
 }
@@ -168,6 +175,24 @@ static bool is_raft_bulk(uint32_t id)
 bool canbus_raft_tx_ready(int bus)
 {
 	return atomic_get(&tx_inflight[bus]) < RAFT_TX_MAX_INFLIGHT;
+}
+
+bool canbus_raft_wait_reserve(int bus)
+{
+	uint32_t start = k_cycle_get_32();
+
+	while (!canbus_raft_tx_ready(bus)) {
+		if (k_cyc_to_us_floor32(k_cycle_get_32() - start) >= RAFT_TX_RESERVE_WAIT_US) {
+			return false;
+		}
+		k_sleep(K_USEC(100));
+	}
+	return true;
+}
+
+long canbus_tx_inflight(int bus)
+{
+	return (long)atomic_get(&tx_inflight[bus]);
 }
 
 static void state_cb(const struct device *dev, enum can_state state, struct can_bus_err_cnt err,
@@ -301,21 +326,15 @@ int canbus_send_raft(uint32_t id, const uint8_t payload[FRAME_DLC])
 		if (!bus_running[bus] || atomic_get(&bus_degraded[bus])) {
 			continue;
 		}
-		if (is_raft_bulk(id)) {
-			/* Leave the last TX buffer to Lab 3 frames; Raft retries anyway. */
-			int64_t give_up = k_uptime_get() + RAFT_TX_WAIT_MS;
-
-			while (!canbus_raft_tx_ready(bus) && k_uptime_get() < give_up) {
-				k_sleep(K_USEC(100));
-			}
-			if (!canbus_raft_tx_ready(bus)) {
-				atomic_inc(&canbus_stats.bus[bus].tx_full);
-				continue;
-			}
+		/*
+		 * Prefer to leave the last TX buffer to Lab 3 frames, but never skip a
+		 * fragment for it: a missing fragment loses the whole message.
+		 */
+		if (is_raft_bulk(id) && !canbus_raft_wait_reserve(bus)) {
+			atomic_inc(&canbus_stats.bus[bus].raft_late);
 		}
 		tp_toggle(tp_tx[bus]);
-		/* REF may wait briefly for a buffer, as before; bulk was checked above. */
-		int ret = send_counted(bus, &frame, is_raft_bulk(id) ? K_NO_WAIT : K_MSEC(2));
+		int ret = send_counted(bus, &frame, K_MSEC(2));
 		if (ret == 0) {
 			sent++;
 		} else if (ret == -EAGAIN) {

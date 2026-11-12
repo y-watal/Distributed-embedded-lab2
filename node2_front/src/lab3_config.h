@@ -83,13 +83,14 @@
  * see the frame: it is on N3's brake path.
  */
 /*
- * Lab 5: bulk Raft fragments may occupy at most 2 of the MCP2515's 3 TX
- * buffers, so a K_NO_WAIT heartbeat, CTRL, or FAULT always finds one free.
- * A fragment waits up to RAFT_TX_WAIT_MS for room, then is skipped (Raft
- * resends); the relay skips relayed fragments the same way.
+ * Lab 5: bulk Raft fragments prefer to occupy at most 2 of the MCP2515's 3
+ * TX buffers, so a K_NO_WAIT heartbeat, CTRL, or FAULT finds one free. A
+ * fragment waits up to RAFT_TX_RESERVE_WAIT_US for that, then is sent anyway
+ * (with the old 2 ms wait for any buffer) and counted as "late". Skipping
+ * fragments instead lost every multi-frame message (N2/N3 split, term 885).
  */
-#define RAFT_TX_MAX_INFLIGHT 2
-#define RAFT_TX_WAIT_MS      3
+#define RAFT_TX_MAX_INFLIGHT    2
+#define RAFT_TX_RESERVE_WAIT_US 1000
 
 #define PRIO_RELAY    3
 #define PRIO_DISPATCH 4

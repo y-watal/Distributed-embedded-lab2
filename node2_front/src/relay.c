@@ -61,13 +61,14 @@ static void forward(const struct relay_item *item)
 }
 
 /*
- * A bulk Raft fragment may not take the last MCP2515 TX buffer. Wait for
- * room in short sleeps, forwarding any CTRL or FAULT that arrives meanwhile,
- * so urgent frames never queue behind Raft. Returns false to skip it.
+ * A bulk Raft fragment prefers not to take the last MCP2515 TX buffer. Wait
+ * for room in short sleeps, forwarding any CTRL or FAULT that arrives
+ * meanwhile, so urgent frames never queue behind Raft. Returns false if the
+ * wait ran out; the fragment is then relayed anyway.
  */
 static bool wait_raft_room(int dst)
 {
-	int64_t give_up = k_uptime_get() + RAFT_TX_WAIT_MS;
+	uint32_t start = k_cycle_get_32();
 	struct relay_item urgent;
 
 	while (!canbus_raft_tx_ready(dst)) {
@@ -75,7 +76,7 @@ static bool wait_raft_room(int dst)
 			(void)k_sem_take(&relay_due, K_NO_WAIT); /* its count */
 			forward(&urgent);
 		}
-		if (k_uptime_get() >= give_up) {
+		if (k_cyc_to_us_floor32(k_cycle_get_32() - start) >= RAFT_TX_RESERVE_WAIT_US) {
 			return false;
 		}
 		k_sleep(K_USEC(100));
@@ -108,8 +109,7 @@ static void relay_thread(void *p1, void *p2, void *p3)
 
 		if (raft_bulk && canbus_bus_running(dst) && !canbus_is_degraded(dst) &&
 		    !wait_raft_room(dst)) {
-			atomic_inc(&relay_stats.raft_full);
-			continue;
+			atomic_inc(&relay_stats.raft_late); /* relayed without the reserve */
 		}
 		forward(&item);
 	}

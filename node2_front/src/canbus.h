@@ -49,6 +49,16 @@ int canbus_send_at(uint32_t id, uint8_t payload[FRAME_DLC], bool include_degrade
  * RAFT_TX_MAX_INFLIGHT of the MCP2515's three, so Lab 3 frames keep one.
  */
 bool canbus_raft_tx_ready(int bus);
+
+/*
+ * Wait up to RAFT_TX_RESERVE_WAIT_US for canbus_raft_tx_ready(). Returns
+ * false on timeout; the caller then sends anyway (fail-safe: a Raft message
+ * is never abandoned part-way because of the reserve).
+ */
+bool canbus_raft_wait_reserve(int bus);
+
+/* Frames handed to the MCP2515 and not yet completed (debug). */
+long canbus_tx_inflight(int bus);
 int canbus_send_raft(uint32_t id, const uint8_t payload[FRAME_DLC]);
 
 /* Queues a bit-identical copy of frame on one bus (the relay). */
@@ -80,6 +90,9 @@ bool canbus_take_busoff(int bus);
 struct canbus_bus_stats {
 	atomic_t rx[CANBUS_NUM_SLOTS]; /* every copy received on this bus */
 	atomic_t tx_ok, tx_err, tx_full, tx_skipped;
+	atomic_t tx_queued; /* can_send() accepted; should equal tx_ok + tx_err */
+	atomic_t raft_late; /* Raft sent without the reserve: none free within the wait */
+	atomic_t infl_max;  /* most frames in flight seen at a send */
 };
 
 struct canbus_stats {

@@ -42,13 +42,19 @@ Arbitration only orders frames already waiting in different nodes. Inside one
 node the transmit path also keeps Raft from delaying Lab 3 frames:
 
 - **STM32:** the MCP2515 has three TX buffers and Lab 3 frames are sent with
-  `K_NO_WAIT`. Bulk Raft fragments may hold at most two
+  `K_NO_WAIT`. Bulk Raft fragments prefer to hold at most two
   (`RAFT_TX_MAX_INFLIGHT`), counted in `canbus.c` from `can_send()` to the TX
-  callback, so a heartbeat, CTRL, or FAULT always finds one free. A fragment
-  waits up to 3 ms for room, then is skipped and Raft resends it. N2's relay
-  applies the same rule to relayed fragments and keeps forwarding CTRL and
-  FAULT while one waits (`raftfull` in its report counts skips). REF is one
-  frame and may wait for any buffer.
+  callback, so a heartbeat, CTRL, or FAULT finds one free. A fragment waits up
+  to 1 ms for that (`RAFT_TX_RESERVE_WAIT_US`), then is sent anyway with the
+  old 2 ms wait for any buffer and counted as `late`. It is never skipped: a
+  first version skipped fragments after a 3 ms wait, every multi-frame
+  message lost a fragment, and N2 and N3 split (N2 candidate at term 885,
+  N3 leader at term 351). N2's relay applies the same rule to relayed
+  fragments and keeps forwarding CTRL and FAULT while one waits (`raftlate`).
+  REF is one frame and may wait for any buffer. Each bus line of the report
+  prints `tx q=` (frames `can_send()` accepted, which should equal `ok` +
+  `err`) and `infl N max M late L` (frames in flight now, the most seen, and
+  late Raft sends) to show whether the in-flight count tracks the hardware.
 - **Pi:** the `mcp251x` driver sends one frame at a time from the interface
   queue. Raft uses its own TX-only socket with `SO_PRIORITY` 2 (pfifo_fast
   band 2); the Lab 3 socket uses 6 (band 0), so CTRL and HB are dequeued

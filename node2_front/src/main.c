@@ -32,6 +32,8 @@
 #include "hb.h"
 #include "lab3_config.h"
 #include "node_config.h"
+#include "raft_node.h"
+#include "raft_config.h"
 #include "relay.h"
 #include "report.h"
 #include "tp.h"
@@ -42,6 +44,10 @@
 /* Dispatch thread: route the first copy of each frame. */
 static void on_frame(const struct can_frame *frame, int bus)
 {
+	if (catalog_is_raft(frame->id)) {
+		raft_node_receive(frame);
+		return;
+	}
 	if (frame->id == ID_CTRL) {
 		ctrl_on_frame(frame);
 	} else if (frame->id == ID_BLINK) {
@@ -71,6 +77,7 @@ int main(void)
 	if (canbus_init() < 0) {
 		printk("no CAN controller came up\n");
 	}
+	raft_node_init();
 	relay_init();
 	hb_init();
 	report_init();

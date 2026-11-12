@@ -37,6 +37,7 @@ static const struct can_filter catalog_filters[] = {
 	{.id = ID_HB(0), .mask = 0x7FC},    /* 0x100-0x103 */
 	{.id = ID_BLINK, .mask = CAN_STD_ID_MASK},
 	{.id = ID_FORCE, .mask = CAN_STD_ID_MASK},
+	{.id = ID_RAFT_FIRST, .mask = 0x7E0}, /* all 0x040-0x05f Lab 5 IDs */
 };
 
 struct canbus_stats canbus_stats;
@@ -63,6 +64,13 @@ struct seen {
 	bool valid;
 };
 static struct seen seen[CANBUS_NUM_SLOTS];
+struct raft_recent {
+	uint32_t id;
+	int64_t ms;
+	uint8_t data[FRAME_DLC];
+};
+static struct raft_recent raft_recent[32];
+static uint8_t raft_recent_next;
 /* 32-bit so other threads read it in one access; 0 = never heard. */
 static uint32_t last_hb_ms[NUM_BUSES][NUM_NODES];
 
@@ -84,6 +92,22 @@ static int slot_of(uint32_t id)
 		}
 	}
 	return -1;
+}
+
+static bool raft_duplicate(const struct can_frame *f, int64_t now)
+{
+	for (size_t i = 0; i < ARRAY_SIZE(raft_recent); i++) {
+		if (raft_recent[i].id == f->id && now - raft_recent[i].ms < DUP_WINDOW_MS &&
+		    memcmp(raft_recent[i].data, f->data, FRAME_DLC) == 0) {
+			return true;
+		}
+	}
+	struct raft_recent *r = &raft_recent[raft_recent_next++ % ARRAY_SIZE(raft_recent)];
+
+	r->id = f->id;
+	r->ms = now;
+	memcpy(r->data, f->data, FRAME_DLC);
+	return false;
 }
 
 const struct device *canbus_dev(int bus)
@@ -143,6 +167,22 @@ static void dispatch_thread(void *p1, void *p2, void *p3)
 		int slot = slot_of(f->id);
 		int sender = catalog_sender(f->id);
 		int64_t now = k_uptime_get();
+		if (catalog_is_raft(f->id) && f->dlc == FRAME_DLC) {
+			if (sender == NODE_SELF) {
+				atomic_inc(&canbus_stats.own_echo);
+			} else if (raft_duplicate(f, now)) {
+				atomic_inc(&canbus_stats.duplicates);
+			} else {
+				cur_rx_t = item.t_rx;
+				if (relay_hook) {
+					relay_hook(f, item.bus);
+				}
+				if (app_handler) {
+					app_handler(f, item.bus);
+				}
+			}
+			continue;
+		}
 
 		if (slot < 0 || f->dlc != FRAME_DLC) {
 			atomic_inc(&canbus_stats.unknown_id);
@@ -213,6 +253,33 @@ static int queue_on(int bus, const struct can_frame *frame, uint32_t release, bo
 int canbus_send(uint32_t id, uint8_t payload[FRAME_DLC], bool include_degraded)
 {
 	return canbus_send_at(id, payload, include_degraded, 0);
+}
+
+int canbus_send_raft(uint32_t id, const uint8_t payload[FRAME_DLC])
+{
+	struct can_frame frame = {.id = id, .dlc = FRAME_DLC};
+	int sent = 0;
+
+	if (!catalog_is_raft(id) || catalog_sender(id) != NODE_SELF) {
+		return -EINVAL;
+	}
+	memcpy(frame.data, payload, FRAME_DLC);
+	for (int bus = 0; bus < NUM_BUSES; bus++) {
+		if (!bus_running[bus] || atomic_get(&bus_degraded[bus])) {
+			continue;
+		}
+		tp_toggle(tp_tx[bus]);
+		int ret = can_send(can_devs[bus], &frame, K_MSEC(2), tx_cb,
+				   (void *)(uintptr_t)bus);
+		if (ret == 0) {
+			sent++;
+		} else if (ret == -EAGAIN) {
+			atomic_inc(&canbus_stats.bus[bus].tx_full);
+		} else {
+			atomic_inc(&canbus_stats.bus[bus].tx_err);
+		}
+	}
+	return sent ? 0 : -EIO;
 }
 
 int canbus_send_at(uint32_t id, uint8_t payload[FRAME_DLC], bool include_degraded,

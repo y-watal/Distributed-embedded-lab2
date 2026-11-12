@@ -5,6 +5,7 @@
 #include "canbus.h"
 #include "lab3_config.h"
 #include "node_config.h"
+#include "raft_node.h"
 #include "tp.h"
 #include "jitter.h"
 #include "watchdog.h"
@@ -112,6 +113,7 @@ static bool heard_within(int bus, int node, uint32_t now, uint32_t timeout_ms)
 static void hb_mon_thread(void *p1, void *p2, void *p3)
 {
 	int64_t next = k_uptime_get();
+	bool prev_alive[NUM_NODES] = {false};
 	struct wcet_job job = WCET_JOB(WCET_HB_MON);
 
 	ARG_UNUSED(p1);
@@ -136,6 +138,9 @@ static void hb_mon_thread(void *p1, void *p2, void *p3)
 			bool d = !heard_any || !canbus_bus_running(bus);
 
 			if (d != hb_bus_degraded(bus)) {
+				raft_node_report_event((struct raft_event){
+					d ? RAFT_EVENT_CANLINK_DOWN : RAFT_EVENT_CANLINK_UP,
+					NODE_SELF, (uint8_t)bus, 0});
 				atomic_set(&deg[bus], d);
 				canbus_set_degraded(bus, d);
 				tp_set(tp_deg[bus], d);
@@ -148,9 +153,15 @@ static void hb_mon_thread(void *p1, void *p2, void *p3)
 		/* Zone lost: heartbeat missing on both buses for FAIL_TIMEOUT_MS. */
 		for (int node = 0; node < NUM_NODES; node++) {
 			if (node != NODE_SELF) {
-				atomic_set(&peer_alive[node],
-					   heard_within(BUS_A, node, now, FAIL_TIMEOUT_MS) ||
-						   heard_within(BUS_B, node, now, FAIL_TIMEOUT_MS));
+				bool alive = heard_within(BUS_A, node, now, FAIL_TIMEOUT_MS) ||
+					     heard_within(BUS_B, node, now, FAIL_TIMEOUT_MS);
+				atomic_set(&peer_alive[node], alive);
+				if (alive != prev_alive[node]) {
+					raft_node_report_event((struct raft_event){
+						alive ? RAFT_EVENT_NODE_UP : RAFT_EVENT_NODE_DOWN,
+						(uint8_t)node, RAFT_BUS_NONE, 0});
+					prev_alive[node] = alive;
+				}
 			}
 		}
 

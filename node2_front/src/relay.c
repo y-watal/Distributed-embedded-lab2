@@ -15,6 +15,7 @@ struct relay_stats relay_stats;
 
 #define RELAY_STACK_SIZE  1024
 #define RELAY_QUEUE_DEPTH 16
+#define RELAY_URGENT_DEPTH 8
 
 struct relay_item {
 	uint8_t src_bus;
@@ -22,6 +23,8 @@ struct relay_item {
 	struct can_frame frame;
 };
 K_MSGQ_DEFINE(relay_q, sizeof(struct relay_item), RELAY_QUEUE_DEPTH, 4);
+K_MSGQ_DEFINE(relay_urgent_q, sizeof(struct relay_item), RELAY_URGENT_DEPTH, 4);
+K_SEM_DEFINE(relay_due, 0, RELAY_QUEUE_DEPTH + RELAY_URGENT_DEPTH);
 
 K_THREAD_STACK_DEFINE(relay_stack, RELAY_STACK_SIZE);
 static struct k_thread relay_data;
@@ -32,8 +35,14 @@ static void relay_hook(const struct can_frame *frame, int bus)
 	struct relay_item item = {
 		.src_bus = (uint8_t)bus, .t_rx = canbus_rx_cycles(), .frame = *frame};
 
-	if (k_msgq_put(&relay_q, &item, K_NO_WAIT) != 0) {
+	bool urgent = frame->id == ID_CTRL ||
+		      (frame->id >= ID_FAULT(0) && frame->id < ID_FAULT(NUM_NODES));
+	struct k_msgq *queue = urgent ? &relay_urgent_q : &relay_q;
+
+	if (k_msgq_put(queue, &item, K_NO_WAIT) != 0) {
 		atomic_inc(&relay_stats.dropped);
+	} else {
+		k_sem_give(&relay_due);
 	}
 }
 
@@ -48,7 +57,12 @@ static void relay_thread(void *p1, void *p2, void *p3)
 
 	for (;;) {
 		wcet_end(&job);
-		k_msgq_get(&relay_q, &item, K_FOREVER);
+		k_sem_take(&relay_due, K_FOREVER);
+		if (k_msgq_get(&relay_urgent_q, &item, K_NO_WAIT) != 0) {
+			if (k_msgq_get(&relay_q, &item, K_NO_WAIT) != 0) {
+				continue;
+			}
+		}
 		wcet_begin(&job);
 
 		int dst = item.src_bus == BUS_A ? BUS_B : BUS_A;

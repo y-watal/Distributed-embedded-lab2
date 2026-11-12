@@ -12,6 +12,7 @@
 #include "lab3_config.h"
 #include "node_config.h"
 #include "relay.h"
+#include "raft_node.h"
 #include "jitter.h"
 #include "wcet.h"
 
@@ -142,6 +143,7 @@ static void report_thread(void *p1, void *p2, void *p3)
 		printk("  accepted:");
 		print_counts(s->accepted, s->gaps);
 		printk("\n");
+		raft_node_print_status();
 
 		struct ctrl_cmd cmd;
 		uint32_t age;

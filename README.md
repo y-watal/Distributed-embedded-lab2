@@ -10,6 +10,10 @@ and two STM32 Nucleo-F401RE zone controllers.
 | `node1_pi/` | N1, Raspberry Pi 4 (cockpit) | `cockpit` (C, SocketCAN): wheel UDP -> CTRL/BLINK on both buses, HB_N1, HB_MON, FAULT, FORCE |
 | `node2_front/` | N2, front Nucleo | Zephyr app, two MCP2515 on SPI1 |
 | `node3_rear/` | N3, rear Nucleo | Zephyr app, two MCP2515 on SPI1 |
+| `shared/protocol.h` | All three C builds | Common CAN IDs, payload fields, node IDs, and fault codes |
+| `shared/raft_wire.h` | All three C builds | Lab 5 REF, vote, replication, client, event, and fragment wire formats |
+| `shared/raft_config.h` | All three C builds | Lab 5 Raft startup and timing defaults |
+| `shared/raft_agent.c`, `shared/raft_transport.c` | All three C builds | Step 2 Raft agent, client redirects, working log, CAN fragmentation and reassembly |
 | `mac/` | Laptop | Wheel/pedal UDP proxy (from Lab 2) |
 | `lab2_backup/` | - | Complete Lab 2 code: Zephyr app (`west build -b nucleo_f401re lab2_backup`) and the Pi UART receiver in `lab2_backup/pi/` |
 | `docs/lab3_pin_map.md` | - | Lab 3 pins: CAN modules and every test point, per node |

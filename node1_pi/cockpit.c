@@ -46,6 +46,8 @@
 #include <unistd.h>
 
 #include "catalog_pi.h"
+#include "raft_node.h"
+#include "raft_config.h"
 #include "state.h"
 #include "testpoints.h"
 
@@ -232,6 +234,14 @@ static bool send_on_j(int bus, uint32_t id, const uint8_t data[FRAME_DLC], bool 
 	return true;
 }
 
+static bool raft_emit_frame(uint32_t id, const uint8_t data[FRAME_DLC])
+{
+	bool a = send_on_j(BUS_A, id, data, false, -1, 0);
+	bool b = send_on_j(BUS_B, id, data, false, -1, 0);
+
+	return a || b;
+}
+
 /* Sets the sequence number and queues on both buses back to back. */
 static void send_both_j(uint32_t id, uint8_t data[FRAME_DLC], bool include_degraded, int jmsg,
 			uint64_t release_ns)
@@ -321,6 +331,7 @@ static int can_open(const char *ifname)
 		{ID_HB(NODE_N2), CAN_SFF_MASK | CAN_EFF_FLAG | CAN_RTR_FLAG},
 		{ID_HB(NODE_N3), CAN_SFF_MASK | CAN_EFF_FLAG | CAN_RTR_FLAG},
 		{ID_FORCE, CAN_SFF_MASK | CAN_EFF_FLAG | CAN_RTR_FLAG},
+		{ID_RAFT_FIRST, 0x7E0 | CAN_EFF_FLAG | CAN_RTR_FLAG},
 	};
 	setsockopt(fd, SOL_CAN_RAW, CAN_RAW_FILTER, filters, sizeof(filters));
 	can_err_mask_t err_mask = CAN_ERR_BUSOFF | CAN_ERR_CRTL | CAN_ERR_RESTARTED;
@@ -577,6 +588,10 @@ static void *can_rx_thread(void *arg)
 					continue;
 				}
 				uint32_t id = f.can_id & CAN_SFF_MASK;
+				if (catalog_is_raft(id) && f.can_dlc == FRAME_DLC) {
+					raft_node_receive(id, f.data);
+					continue;
+				}
 				int slot = catalog_slot(id);
 				int sender = catalog_sender(id);
 
@@ -710,6 +725,9 @@ static void monitor(uint64_t now)
 		bool d = !heard_any;
 
 		if (d != deg[bus]) {
+			raft_node_report_event((struct raft_event){
+				d ? RAFT_EVENT_CANLINK_DOWN : RAFT_EVENT_CANLINK_UP,
+				NODE_N1, (uint8_t)bus, 0});
 			deg[bus] = d;
 			atomic_store(&bus_deg[bus], d);
 			tp_set(tp_deg[bus], d);
@@ -728,6 +746,11 @@ static void monitor(uint64_t now)
 
 			queue_fault(FAULT_PEER_LOST, (uint8_t)n, last + FAIL_TIMEOUT_NS); /* informational */
 		}
+		if (alive != peer_alive[n]) {
+			raft_node_report_event((struct raft_event){
+				alive ? RAFT_EVENT_NODE_UP : RAFT_EVENT_NODE_DOWN,
+				(uint8_t)n, RAFT_BUS_NONE, 0});
+		}
 		peer_alive[n] = alive;
 		all_alive = all_alive && alive;
 		/* a zone reporting a fault, or not ready (BOOT / ISOLATED), keeps us in error */
@@ -738,6 +761,15 @@ static void monitor(uint64_t now)
 
 	bool udp_ok = have_udp && now - last_udp_ns < UDP_TIMEOUT_NS;
 	uint8_t lf = test_fault ? FAULT_TEST_BUTTON : (udp_ok ? FAULT_NONE : FAULT_UDP_TIMEOUT);
+	static bool reported_cockpit, last_cockpit_ok;
+	bool cockpit_ok = udp_ok && !test_fault;
+	if (!reported_cockpit || cockpit_ok != last_cockpit_ok) {
+		raft_node_report_event((struct raft_event){
+			cockpit_ok ? RAFT_EVENT_COCKPIT_OK : RAFT_EVENT_COCKPIT_ERROR,
+			NODE_N1, RAFT_BUS_NONE, 0});
+		reported_cockpit = true;
+		last_cockpit_ok = cockpit_ok;
+	}
 
 	if (lf != local_fault) {
 		if (lf != FAULT_NONE && booted) {
@@ -970,6 +1002,7 @@ static void *report_thread(void *arg)
 		printf("  dup %u | FAULT rx %u | force %d, forwarded %u\n", atomic_exchange(&dup_count, 0),
 		       atomic_exchange(&fault_rx, 0), atomic_load(&force_last),
 		       atomic_exchange(&force_fwd, 0));
+		raft_node_print_status();
 		if (++reports % J_REPORT_EVERY == 0) {
 			printf("  J, trigger -> write() returned, us: max since start / max last %d s / mean (frames)\n",
 			       J_REPORT_EVERY);
@@ -1188,6 +1221,10 @@ int main(int argc, char **argv)
 		proxy_addr.sin_port = htons((uint16_t)opt.force_port);
 		proxy_addr.sin_addr.s_addr = inet_addr(opt.force_host);
 		have_proxy = true;
+	}
+	if (raft_node_init(raft_emit_frame) < 0) {
+		fprintf(stderr, "could not start Raft agent\n");
+		return 1;
 	}
 
 	struct sigaction sa = {.sa_handler = on_signal}; /* no SA_RESTART: recvfrom returns */

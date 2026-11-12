@@ -43,6 +43,9 @@ int canbus_send(uint32_t id, uint8_t payload[FRAME_DLC], bool include_degraded);
 int canbus_send_at(uint32_t id, uint8_t payload[FRAME_DLC], bool include_degraded,
 		   uint32_t release);
 
+/* Sends one raw Lab 5 frame without overwriting byte 0 with a Lab 3 sequence. */
+int canbus_send_raft(uint32_t id, const uint8_t payload[FRAME_DLC]);
+
 /* Queues a bit-identical copy of frame on one bus (the relay). */
 int canbus_forward(int bus, const struct can_frame *frame);
 int canbus_forward_at(int bus, const struct can_frame *frame, uint32_t release);

@@ -6,7 +6,7 @@
 
 #define NODE_SELF     NODE_N3
 #define NODE_NAME     "N3"
-#define RELAY_ENABLED 0 /* only N2 relays */
+#define RELAY_ENABLED 1 /* bridges buses when the committed graph names this node (raft_route_relay) */
 
 /*
  * Current sensors: {ADC1 channel, polarity, name}. Lab 2 wiring: left motor

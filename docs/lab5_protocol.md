@@ -52,7 +52,7 @@ node the transmit path also keeps Raft from delaying Lab 3 frames:
   old 2 ms wait for any buffer and counted as `late`. It is never skipped: a
   first version skipped fragments after a 3 ms wait, every multi-frame
   message lost a fragment, and N2 and N3 split (N2 candidate at term 885,
-  N3 leader at term 351). N2's relay applies the same rule to relayed
+  N3 leader at term 351). The relay (on whichever node bridges) applies the same rule to relayed
   fragments and keeps forwarding CTRL and FAULT while one waits (`raftlate`).
   REF is one frame and may wait for any buffer. The reserve alone did not
   stop heartbeat losses: the Zephyr MCP2515 driver frees a TX buffer slightly
@@ -144,6 +144,26 @@ The fragments are reassembled into one logical message before the Raft agent
 checks its term, previous index, and commit index. The protocol can carry a
 body up to 255 bytes if a later message needs more than one entry, although
 the current `APPEND` format deliberately sends one entry at a time.
+
+## Relaying (graph-only, any node)
+
+Every node runs the same rule, `raft_route_relay()` in `shared/raft_route.h`;
+the Pi does so in `cockpit.c`, the STM32s in `relay.c`. A node forwards a
+frame from sender S, received on bus X, onto the other bus Y if and only if,
+in its committed graph:
+
+1. it is the **bridge** for S: the lowest-ID live node other than S with both
+   links up (every node computes the same answer, so exactly one relays);
+2. S is not known to be on Y; and
+3. some live node other than S and itself is committed **off** X but may be
+   on Y, so it cannot hear S any other way.
+
+With all links up, or with one link down, nothing is relayed. In the checkoff
+hop (N1 off B, N3 off A) N2 is the bridge in both directions; with N2 off A
+and N3 off B the Pi bridges; with N1 off A and N2 off B, N3 does. Nothing is
+relayed for a link change until it commits, so a hop takes a few rounds to
+form (handout Part 5.2): expect a brief peer-lost or CTRL gap on the far side
+while the second link's `CANLINK_DOWN` commits.
 
 ## Log compaction
 

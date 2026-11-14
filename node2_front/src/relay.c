@@ -53,23 +53,11 @@ static void relay_hook(const struct can_frame *frame, int bus)
 	}
 }
 
+/* Same graph-only rule on every node (shared/raft_route.h). */
 static bool should_relay(const struct relay_item *item)
 {
-	int sender = catalog_sender(item->frame.id);
-
-	if (raft_route_relay(raft_node_route_snapshot(), sender, item->src_bus)) {
-		return true;
-	}
-	/* A newly broken link can precede its committed graph entry. N2's direct
-	 * heartbeat observations provide a temporary route during that gap. */
-	uint32_t last_hb[2][NUM_NODES] = {{0}};
-
-	for (int bus = 0; bus < 2; bus++) {
-		last_hb[bus][NODE_N1] = canbus_last_hb_ms(bus, NODE_N1);
-		last_hb[bus][NODE_N3] = canbus_last_hb_ms(bus, NODE_N3);
-	}
-	return raft_route_live_hop(k_uptime_get_32(), last_hb, sender,
-		item->src_bus, DEG_TIMEOUT_MS);
+	return raft_route_relay(raft_node_route_snapshot(), NODE_SELF,
+				catalog_sender(item->frame.id), item->src_bus);
 }
 
 static void forward(const struct relay_item *item);

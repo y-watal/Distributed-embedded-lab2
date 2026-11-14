@@ -142,6 +142,7 @@ static atomic_bool inject_malformed, inject_range, stop;
 
 /* ---- Statistics ---- */
 static atomic_uint udp_count, ctrl_sent, dup_count, fault_rx, force_fwd;
+static atomic_uint relay_fwd, relay_fail; /* frames bridged for other nodes */
 static atomic_int force_last;
 static atomic_uint tx_ok[NUM_BUSES], tx_err[NUM_BUSES], tx_skip[NUM_BUSES], err_frames[NUM_BUSES];
 static atomic_uint rx_count[NUM_BUSES][NUM_SLOTS];
@@ -607,6 +608,29 @@ static void udp_loop(void)
 /* CAN receive: heartbeats, FAULT, FORCE                                 */
 /* ===================================================================== */
 
+/*
+ * The Pi bridges like any other node: the same graph-only rule as the STM32s
+ * (shared/raft_route.h) decides whether this node relays a frame from another
+ * node onto the other bus. Raft frames go out on the Raft socket and Lab 3
+ * frames on the Lab 3 socket, keeping their queue priorities.
+ */
+static void relay_frame(int src_bus, const struct can_frame *f, uint32_t id)
+{
+	int dst = 1 - src_bus;
+
+	if (!raft_route_relay(raft_node_route_snapshot(), NODE_N1, catalog_sender(id), src_bus) ||
+	    atomic_load_explicit(&bus_deg[dst], memory_order_relaxed)) {
+		return;
+	}
+	int fd = catalog_is_raft(id) ? raft_fd[dst] : can_fd[dst];
+
+	if (write(fd, f, sizeof(*f)) == (ssize_t)sizeof(*f)) {
+		atomic_fetch_add(&relay_fwd, 1);
+	} else {
+		atomic_fetch_add(&relay_fail, 1);
+	}
+}
+
 static void *can_rx_thread(void *arg)
 {
 	struct pollfd pfd[NUM_BUSES];
@@ -644,8 +668,9 @@ static void *can_rx_thread(void *arg)
 				}
 				uint32_t id = f.can_id & CAN_SFF_MASK;
 				if (catalog_is_raft(id) && f.can_dlc == FRAME_DLC) {
-					/* skip our own frames: Raft-socket echo, N2 relay */
+					/* skip our own frames: Raft-socket echo, a relayed copy */
 					if (catalog_sender(id) != NODE_N1) {
+						relay_frame(bus, &f, id);
 						raft_node_receive(id, f.data);
 					}
 					continue;
@@ -675,6 +700,7 @@ static void *can_rx_thread(void *arg)
 				seen[slot].seq = seq;
 				seen[slot].ns = now;
 				seen[slot].valid = true;
+				relay_frame(bus, &f, id); /* first copies only, like the STM32s */
 
 				if (id == (uint32_t)ID_HB(sender)) {
 					bool lf = f.data[1] & HB_B1_LOCAL_FAULT;
@@ -1058,9 +1084,11 @@ static void *report_thread(void *arg)
 			}
 			printf("%s\n", any ? "" : " (nothing)");
 		}
-		printf("  dup %u | FAULT rx %u | force %d, forwarded %u\n", atomic_exchange(&dup_count, 0),
+		printf("  dup %u | FAULT rx %u | force %d, forwarded %u | relay %u fail %u\n",
+		       atomic_exchange(&dup_count, 0),
 		       atomic_exchange(&fault_rx, 0), atomic_load(&force_last),
-		       atomic_exchange(&force_fwd, 0));
+		       atomic_exchange(&force_fwd, 0), atomic_exchange(&relay_fwd, 0),
+		       atomic_exchange(&relay_fail, 0));
 		raft_node_print_status();
 		if (++reports % J_REPORT_EVERY == 0) {
 			printf("  J, trigger -> write() returned, us: max since start / max last %d s / mean (frames)\n",

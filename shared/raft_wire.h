@@ -26,6 +26,20 @@ enum raft_event_type {
 	RAFT_EVENT_APPLICATION = 7,
 };
 
+static inline const char *raft_event_name(uint8_t type)
+{
+	switch (type) {
+	case RAFT_EVENT_COCKPIT_OK: return "COCKPIT_OK";
+	case RAFT_EVENT_COCKPIT_ERROR: return "COCKPIT_ERROR";
+	case RAFT_EVENT_NODE_UP: return "NODE_UP";
+	case RAFT_EVENT_NODE_DOWN: return "NODE_DOWN";
+	case RAFT_EVENT_CANLINK_UP: return "CANLINK_UP";
+	case RAFT_EVENT_CANLINK_DOWN: return "CANLINK_DOWN";
+	case RAFT_EVENT_APPLICATION: return "APPLICATION";
+	default: return "UNKNOWN";
+	}
+}
+
 struct raft_event {
 	uint8_t type;
 	uint8_t node;  /* NODE_N1..NODE_N3, or event source */

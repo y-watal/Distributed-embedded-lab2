@@ -154,6 +154,10 @@ void raft_node_get_network(struct raft_network *out)
 void raft_node_print_status(void)
 {
 	uint32_t term, last_index, commit_index;
+	static struct raft_log_entry log_snapshot[RAFT_WORKING_LOG_ENTRIES];
+	static uint32_t printed_last, printed_commit;
+	static bool printed;
+	bool print_log;
 	int leader;
 	enum raft_role role;
 	struct raft_network network;
@@ -165,6 +169,13 @@ void raft_node_print_status(void)
 	last_index = agent.last_index;
 	commit_index = agent.commit_index;
 	network = agent.network;
+	print_log = !printed || printed_last != last_index || printed_commit != commit_index;
+	if (print_log) {
+		memcpy(log_snapshot, agent.log, last_index * sizeof(log_snapshot[0]));
+		printed_last = last_index;
+		printed_commit = commit_index;
+		printed = true;
+	}
 	pthread_mutex_unlock(&lock);
 	if (leader < 0) {
 		printf("  raft: term %u leader unknown %s log %u commit %u\n", term,
@@ -184,4 +195,18 @@ void raft_node_print_status(void)
 	}
 	printf(" cockpit=%c\n", network.cockpit_known ?
 	       (network.cockpit_ok ? 'U' : 'D') : '?');
+	if (print_log) {
+		printf("  raft log snapshot: %u entries, commit through %u\n",
+		       last_index, commit_index);
+		for (uint32_t i = 0; i < last_index; i++) {
+			const struct raft_event *e = &log_snapshot[i].event;
+			char bus = e->bus < 2 ? (char)('A' + e->bus) : '-';
+
+			printf("    [%u] term %u %s %s N%u bus %c value %u\n",
+			       i + 1, log_snapshot[i].term,
+			       i < commit_index ? "COMMITTED" : "PENDING",
+			       raft_event_name(e->type), (unsigned)e->node + 1,
+			       bus, (unsigned)e->value);
+		}
+	}
 }

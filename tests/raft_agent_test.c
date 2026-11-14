@@ -164,10 +164,67 @@ static void pump(struct simulation *s, uint32_t now)
 	assert(s->count == 0);
 }
 
+static void assert_same_committed_log(const struct raft_agent *leader,
+				      const struct raft_agent *follower)
+{
+	assert(follower->last_index == leader->last_index);
+	assert(follower->commit_index == leader->commit_index);
+	assert(follower->applied_index == leader->applied_index);
+	for (uint32_t i = 0; i < leader->commit_index; i++) {
+		assert(follower->log[i].term == leader->log[i].term);
+		assert(memcmp(&follower->log[i].event, &leader->log[i].event,
+			      sizeof(struct raft_event)) == 0);
+	}
+}
+
+static void test_returning_follower_catches_up(void)
+{
+	struct simulation s = {0};
+	const struct raft_event events[] = {
+		{RAFT_EVENT_NODE_UP, NODE_N2, RAFT_BUS_NONE, 0},
+		{RAFT_EVENT_CANLINK_UP, NODE_N2, 0, 0},
+		{RAFT_EVENT_CANLINK_UP, NODE_N2, 1, 0},
+	};
+
+	for (int node = 0; node < NUM_NODES; node++) {
+		raft_agent_init(&s.nodes[node], (uint8_t)node, send_message, &s, 0,
+				(uint32_t)(node + 1));
+	}
+	s.active[NODE_N1] = true;
+	s.active[NODE_N2] = true;
+	/* N3 misses three entries while N1 and N2 form a majority. */
+	for (uint32_t i = 0; i < sizeof(events) / sizeof(events[0]); i++) {
+		uint32_t now = 10 + i * 10;
+
+		deliver_update(&s.nodes[NODE_N1], NODE_N2, i + 1, events[i], now);
+		raft_agent_poll(&s.nodes[NODE_N1], now);
+		pump(&s, now);
+		assert(s.nodes[NODE_N1].commit_index == i + 1);
+	}
+	assert(s.nodes[NODE_N3].last_index == 0);
+	s.active[NODE_N3] = true;
+	/* The next required empty APPEND discovers the missing prefix. */
+	raft_agent_poll(&s.nodes[NODE_N1], 110);
+	pump(&s, 110);
+	assert_same_committed_log(&s.nodes[NODE_N1], &s.nodes[NODE_N2]);
+	assert_same_committed_log(&s.nodes[NODE_N1], &s.nodes[NODE_N3]);
+
+	/* A reboot loses N3's RAM log and must trigger the same catch-up again. */
+	raft_agent_init(&s.nodes[NODE_N3], NODE_N3, send_message, &s, 120, 3);
+	raft_agent_poll(&s.nodes[NODE_N1], 220);
+	pump(&s, 220);
+	assert_same_committed_log(&s.nodes[NODE_N1], &s.nodes[NODE_N3]);
+	/* Repeated empty APPEND traffic must not duplicate any entries. */
+	raft_agent_poll(&s.nodes[NODE_N1], 320);
+	pump(&s, 320);
+	assert_same_committed_log(&s.nodes[NODE_N1], &s.nodes[NODE_N3]);
+}
+
 int main(void)
 {
 	test_reject_backoff();
 	test_debounce_and_coalesce();
+	test_returning_follower_catches_up();
 
 	struct simulation s = {0};
 	struct raft_agent early_follower;

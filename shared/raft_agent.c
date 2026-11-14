@@ -415,6 +415,9 @@ static void handle_append(struct raft_agent *a, uint8_t sender,
 						  m->leader_commit : a->last_index;
 				apply_committed(a);
 			}
+		} else if (m->prev_index <= a->last_index) {
+			/* The preceding entry exists but conflicts. Retry from that index. */
+			ack.match_index = m->prev_index;
 		}
 	}
 	raft_append_ack_encode(&ack, body);
@@ -437,9 +440,21 @@ static void handle_append_ack(struct raft_agent *a, uint8_t sender,
 	}
 	if (!m->success) {
 		if (m->match_index > 0 && m->match_index <= a->last_index) {
+			/* A restarted follower may have lost progress we recorded earlier. */
+			a->follower_match[sender] = m->match_index - 1;
 			send_append(a, sender, m->match_index);
 		}
 		return;
+	}
+	if (m->match_index > a->last_index) {
+		return;
+	}
+	if (m->match_index > a->follower_match[sender]) {
+		a->follower_match[sender] = m->match_index;
+		if (m->match_index < a->last_index) {
+			/* Continue catch-up one entry at a time, including committed entries. */
+			send_append(a, sender, m->match_index + 1);
+		}
 	}
 	if (a->pending_index == 0 || m->match_index != a->pending_index) {
 		return;
@@ -551,6 +566,7 @@ void raft_agent_receive(struct raft_agent *a, uint32_t id, const uint8_t *body,
 				a->role = RAFT_LEADER;
 				a->leader = a->self;
 				a->election_timer_active = false;
+				memset(a->follower_match, 0, sizeof(a->follower_match));
 			}
 		}
 	}

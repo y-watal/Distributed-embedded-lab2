@@ -2,8 +2,8 @@
  * Shared dual-CAN layer.
  *
  *  - Both MCP2515 controllers, with receive filters for the catalog IDs only.
- *  - canbus_send(): queues one frame on bus A and bus B back to back with the
- *    same per-ID sequence number, bumped once.
+ *  - canbus_send(): queues one frame on selected usable buses with the same
+ *    per-ID sequence number, bumped once.
  *  - One dispatch thread that drops duplicates by (ID, seq) - the A copy, the
  *    B copy and any relayed copy - before anything else sees the frame, and
  *    records when each node's heartbeat was last heard on each bus.
@@ -31,8 +31,8 @@ void canbus_set_handler(canbus_handler_t handler);
 
 /*
  * Sends payload (bytes 1-7 used; byte 0 is overwritten with the sequence
- * number) on both buses. Buses marked degraded are skipped unless
- * include_degraded is set (heartbeats keep going out so the link can recover).
+ * number) on graph-selected usable buses. Buses marked degraded are skipped
+ * unless include_degraded is set (heartbeats keep probing for recovery).
  */
 int canbus_send(uint32_t id, uint8_t payload[FRAME_DLC], bool include_degraded);
 

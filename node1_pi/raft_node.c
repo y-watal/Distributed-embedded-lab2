@@ -2,11 +2,13 @@
 #include "raft_node.h"
 
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
 
 #include "raft_transport.h"
+#include "raft_route.h"
 
 #define RAFT_QUEUE_DEPTH 64
 
@@ -19,6 +21,7 @@ struct raft_work {
 
 static struct raft_agent agent;
 static struct raft_transport transport;
+static atomic_uint route_snapshot;
 static pi_raft_emit_fn emit_can;
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t wake = PTHREAD_COND_INITIALIZER;
@@ -100,6 +103,8 @@ static void *raft_worker(void *arg)
 			raft_client_observe(&agent, work.event, now);
 		}
 		raft_agent_poll(&agent, now);
+		atomic_store_explicit(&route_snapshot, raft_route_snapshot(&agent.network),
+			memory_order_relaxed);
 		pthread_mutex_unlock(&lock);
 	}
 	return NULL;
@@ -149,6 +154,11 @@ void raft_node_get_network(struct raft_network *out)
 	pthread_mutex_lock(&lock);
 	raft_client_get_network(&agent, out);
 	pthread_mutex_unlock(&lock);
+}
+
+uint32_t raft_node_route_snapshot(void)
+{
+	return atomic_load_explicit(&route_snapshot, memory_order_relaxed);
 }
 
 void raft_node_print_status(void)

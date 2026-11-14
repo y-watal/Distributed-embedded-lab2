@@ -6,6 +6,8 @@
 #include "hb.h"
 #include "lab3_config.h"
 #include "node_config.h"
+#include "raft_node.h"
+#include "raft_route.h"
 #include "tp.h"
 #include "wcet.h"
 
@@ -46,10 +48,33 @@ static void relay_hook(const struct can_frame *frame, int bus)
 	}
 }
 
+static bool should_relay(const struct relay_item *item)
+{
+	int sender = catalog_sender(item->frame.id);
+
+	if (raft_route_relay(raft_node_route_snapshot(), sender, item->src_bus)) {
+		return true;
+	}
+	/* A newly broken link can precede its committed graph entry. N2's direct
+	 * heartbeat observations provide a temporary route during that gap. */
+	uint32_t last_hb[2][NUM_NODES] = {{0}};
+
+	for (int bus = 0; bus < 2; bus++) {
+		last_hb[bus][NODE_N1] = canbus_last_hb_ms(bus, NODE_N1);
+		last_hb[bus][NODE_N3] = canbus_last_hb_ms(bus, NODE_N3);
+	}
+	return raft_route_live_hop(k_uptime_get_32(), last_hb, sender,
+		item->src_bus, DEG_TIMEOUT_MS);
+}
+
 static void forward(const struct relay_item *item)
 {
 	int dst = item->src_bus == BUS_A ? BUS_B : BUS_A;
 
+	if (!should_relay(item)) {
+		atomic_inc(&relay_stats.skipped);
+		return;
+	}
 	if (canbus_is_degraded(dst) || !canbus_bus_running(dst)) {
 		atomic_inc(&relay_stats.skipped);
 		return;
@@ -108,6 +133,7 @@ static void relay_thread(void *p1, void *p2, void *p3)
 				 (item.frame.id & ~3u) != ID_REF(0);
 
 		if (raft_bulk && canbus_bus_running(dst) && !canbus_is_degraded(dst) &&
+		    should_relay(&item) &&
 		    !wait_raft_room(dst)) {
 			atomic_inc(&relay_stats.raft_late); /* relayed without the reserve */
 		}

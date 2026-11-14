@@ -5,7 +5,7 @@
  *
  * Threads (priority, lower = higher; all values in lab3_config.h):
  *   MCP2515 driver x2 (2)  SPI frame reads, toggles CAN_RX_A/B via canbus rx_cb
- *   relay      (3, N2)     forwards first copies to the other bus, RELAY_TX
+ *   relay      (3, N2)     bridges selected first copies to the other bus, RELAY_TX
  *   dispatch   (4)         dedup by (ID, seq), heartbeat ages, CTRL check,
  *                          HB/FAULT -> zone state, BLINK -> blink
  *   steer      (5, N2)     CTRL -> servo angle

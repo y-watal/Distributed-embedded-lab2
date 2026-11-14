@@ -11,6 +11,7 @@ int raft_node_init(void);
 void raft_node_receive(const struct can_frame *frame);
 bool raft_node_report_event(struct raft_event event);
 void raft_node_get_network(struct raft_network *out);
+uint32_t raft_node_route_snapshot(void);
 void raft_node_print_status(void);
 
 #endif /* RAFT_NODE_H */

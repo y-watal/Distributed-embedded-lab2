@@ -48,6 +48,7 @@
 #include "catalog_pi.h"
 #include "raft_node.h"
 #include "raft_config.h"
+#include "raft_route.h"
 #include "state.h"
 #include "testpoints.h"
 
@@ -227,6 +228,12 @@ static bool send_on_j(int bus, uint32_t id, const uint8_t data[FRAME_DLC], bool 
 	struct can_frame f = {.can_id = id, .can_dlc = FRAME_DLC};
 
 	if (!include_degraded && atomic_load_explicit(&bus_deg[bus], memory_order_relaxed)) {
+		atomic_fetch_add(&tx_skip[bus], 1);
+		return false;
+	}
+	if (!include_degraded &&
+	    !raft_route_send_on_bus(raft_node_route_snapshot(), NODE_N1, bus,
+		!atomic_load_explicit(&bus_deg[1 - bus], memory_order_relaxed))) {
 		atomic_fetch_add(&tx_skip[bus], 1);
 		return false;
 	}

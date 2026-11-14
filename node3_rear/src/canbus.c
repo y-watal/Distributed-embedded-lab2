@@ -7,6 +7,8 @@
 
 #include "lab3_config.h"
 #include "node_config.h"
+#include "raft_node.h"
+#include "raft_route.h"
 #include "tp.h"
 #include "jitter.h"
 #include "wcet.h"
@@ -327,6 +329,11 @@ int canbus_send_raft(uint32_t id, const uint8_t payload[FRAME_DLC])
 		if (!bus_running[bus] || atomic_get(&bus_degraded[bus])) {
 			continue;
 		}
+		if (!raft_route_send_on_bus(raft_node_route_snapshot(), NODE_SELF, bus,
+			bus_running[1 - bus] && !atomic_get(&bus_degraded[1 - bus]))) {
+			atomic_inc(&canbus_stats.bus[bus].tx_skipped);
+			continue;
+		}
 		/*
 		 * Prefer to leave the last TX buffer to Lab 3 frames, but never skip a
 		 * fragment for it: a missing fragment loses the whole message.
@@ -370,6 +377,12 @@ int canbus_send_at(uint32_t id, uint8_t payload[FRAME_DLC], bool include_degrade
 			continue;
 		}
 		if (!include_degraded && atomic_get(&bus_degraded[bus])) {
+			atomic_inc(&canbus_stats.bus[bus].tx_skipped);
+			continue;
+		}
+		if (!include_degraded &&
+		    !raft_route_send_on_bus(raft_node_route_snapshot(), NODE_SELF, bus,
+			bus_running[1 - bus] && !atomic_get(&bus_degraded[1 - bus]))) {
 			atomic_inc(&canbus_stats.bus[bus].tx_skipped);
 			continue;
 		}

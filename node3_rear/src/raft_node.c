@@ -7,6 +7,7 @@
 #include "canbus.h"
 #include "node_config.h"
 #include "raft_transport.h"
+#include "raft_route.h"
 
 #define RAFT_STACK_SIZE 3072
 #define RAFT_QUEUE_DEPTH 32
@@ -24,6 +25,7 @@ K_THREAD_STACK_DEFINE(raft_stack, RAFT_STACK_SIZE);
 static struct k_thread raft_thread_data;
 static struct raft_agent agent;
 static struct raft_transport transport;
+static atomic_t route_snapshot;
 
 static bool emit_frame(void *ctx, uint32_t id, const uint8_t frame[FRAME_DLC])
 {
@@ -60,6 +62,7 @@ static void raft_thread(void *p1, void *p2, void *p3)
 			raft_client_observe(&agent, work.event, now);
 		}
 		raft_agent_poll(&agent, now);
+		atomic_set(&route_snapshot, (atomic_val_t)raft_route_snapshot(&agent.network));
 		k_mutex_unlock(&raft_lock);
 	}
 }
@@ -103,6 +106,11 @@ void raft_node_get_network(struct raft_network *out)
 	k_mutex_lock(&raft_lock, K_FOREVER);
 	raft_client_get_network(&agent, out);
 	k_mutex_unlock(&raft_lock);
+}
+
+uint32_t raft_node_route_snapshot(void)
+{
+	return (uint32_t)atomic_get(&route_snapshot);
 }
 
 void raft_node_print_status(void)

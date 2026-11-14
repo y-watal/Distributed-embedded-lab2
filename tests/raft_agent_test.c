@@ -178,6 +178,61 @@ static void test_debounce_and_coalesce(void)
 	assert(a.queued[a.queue_head].type == RAFT_EVENT_CANLINK_DOWN);
 }
 
+static void test_stale_peer_loss_is_rejected(void)
+{
+	struct sink sink = {0};
+	struct raft_agent leader;
+	struct raft_event down = {RAFT_EVENT_NODE_DOWN, NODE_N2, RAFT_BUS_NONE, 0};
+
+	raft_agent_init(&leader, NODE_N1, sink_send, &sink, 0, 1);
+	raft_client_observe(&leader,
+		(struct raft_event){RAFT_EVENT_NODE_UP, NODE_N2, RAFT_BUS_NONE, 0}, 1);
+	deliver_update(&leader, NODE_N3, 7, down, 2);
+	assert(leader.last_index == 0 && leader.pending_index == 0);
+	assert(sink.replies == 1 && sink.last_reply.status == RAFT_CLIENT_REJECTED);
+
+	down.node = NODE_N1;
+	deliver_update(&leader, NODE_N3, 8, down, 3);
+	assert(leader.last_index == 0 && sink.replies == 2 &&
+	       sink.last_reply.status == RAFT_CLIENT_REJECTED);
+
+	/* A peer loss can be logged once the leader also observes that loss. */
+	down.node = NODE_N2;
+	raft_client_observe(&leader, down, 4);
+	deliver_update(&leader, NODE_N3, 7, down, 5);
+	assert(leader.last_index == 1 && leader.pending_index == 1);
+}
+
+static void test_recovery_cancels_stale_loss_and_repairs_graph(void)
+{
+	struct sink sink = {0};
+	struct raft_agent client;
+	struct raft_event down = {RAFT_EVENT_NODE_DOWN, NODE_N1, RAFT_BUS_NONE, 0};
+	struct raft_event up = {RAFT_EVENT_NODE_UP, NODE_N1, RAFT_BUS_NONE, 0};
+
+	raft_agent_init(&client, NODE_N3, sink_send, &sink, 0, 3);
+	raft_client_observe(&client, down, 1);
+	raft_agent_poll(&client, 1 + RAFT_REPORT_DOWN_HOLD_MS);
+	assert(client.active_request && client.active_event.type == RAFT_EVENT_NODE_DOWN);
+	raft_client_observe(&client, up, 60);
+	assert(!client.active_request);
+	raft_agent_poll(&client, 60 + RAFT_REPORT_UP_HOLD_MS);
+	assert(client.active_request && client.active_event.type == RAFT_EVENT_NODE_UP);
+
+	/* A committed NODE_DOWN also marked both links down. Stable local
+	 * link-up observations must restore them without a new physical edge. */
+	client.active_request = false;
+	raft_client_observe(&client,
+		(struct raft_event){RAFT_EVENT_CANLINK_UP, NODE_N3, 0, 0}, 200);
+	raft_agent_poll(&client, 200 + RAFT_REPORT_UP_HOLD_MS);
+	assert(client.active_request && client.active_event.type == RAFT_EVENT_CANLINK_UP);
+	client.active_request = false;
+	client.network.link_known[NODE_N3][0] = true;
+	client.network.link_up[NODE_N3][0] = false;
+	raft_agent_poll(&client, 301);
+	assert(client.active_request && client.active_event.type == RAFT_EVENT_CANLINK_UP);
+}
+
 static void pump(struct simulation *s, uint32_t now)
 {
 	for (unsigned rounds = 0; rounds < 100 && s->count; rounds++) {
@@ -274,6 +329,9 @@ static void test_isolated_follower_does_not_raise_term(void)
 	s.active[NODE_N3] = false;
 	for (uint32_t t = 105; t <= 1000; t += 5) {
 		if (t == 300) {
+			raft_client_observe(&s.nodes[NODE_N1],
+				(struct raft_event){RAFT_EVENT_NODE_DOWN, NODE_N3,
+					RAFT_BUS_NONE, 0}, t);
 			deliver_update(&s.nodes[NODE_N1], NODE_N2, 1,
 				       (struct raft_event){RAFT_EVENT_NODE_DOWN, NODE_N3,
 							   RAFT_BUS_NONE, 0}, t);
@@ -307,6 +365,8 @@ int main(void)
 	test_commit_stops_at_matching_prefix();
 	test_reject_backoff();
 	test_debounce_and_coalesce();
+	test_stale_peer_loss_is_rejected();
+	test_recovery_cancels_stale_loss_and_repairs_graph();
 	test_returning_follower_catches_up();
 	test_isolated_follower_does_not_raise_term();
 

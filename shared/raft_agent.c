@@ -222,6 +222,14 @@ static void handle_client_update(struct raft_agent *a, uint8_t sender,
 		reply_client(a, sender, m->request_id, RAFT_CLIENT_REDIRECT, 0);
 		return;
 	}
+	/* A disconnected client may replay a stale loss after it rejoins. The
+	 * leader must not record its own death or a peer it still hears alive. */
+	if (m->event.type == RAFT_EVENT_NODE_DOWN && m->event.node < NUM_NODES &&
+	    (m->event.node == a->self || !a->obs[1 + m->event.node].seen ||
+	     a->obs[1 + m->event.node].up)) {
+		client_result(a, sender, m->request_id, RAFT_CLIENT_REJECTED, 0);
+		return;
+	}
 	if (a->last_client_id[sender] == m->request_id &&
 	    a->last_client_index[sender] != 0) {
 		client_result(a, sender, m->request_id, RAFT_CLIENT_COMMITTED,
@@ -313,6 +321,14 @@ bool raft_client_observe(struct raft_agent *a, struct raft_event event, uint32_t
 		o->seen = true;
 		o->up = up;
 		o->since_ms = now_ms;
+		/* Do not retry a peer-loss claim after hearing that peer again. */
+		if (up && a->active_request) {
+			bool active_up;
+			if (event_subject(&a->active_event, &active_up) == subject &&
+			    !active_up) {
+				a->active_request = false;
+			}
+		}
 	}
 	return true;
 }
@@ -324,11 +340,28 @@ static void client_debounce(struct raft_agent *a, uint32_t now_ms)
 		struct raft_observation *o = &a->obs[s];
 		uint32_t hold = o->up ? RAFT_REPORT_UP_HOLD_MS : RAFT_REPORT_DOWN_HOLD_MS;
 
-		if (!o->seen || (o->reported && o->reported_up == o->up) ||
+		struct raft_event current = subject_event(s, o->up);
+		bool graph_disagrees = false;
+		/* Only a node can repair its own links. A cached observation about
+		 * another node is not authoritative after a partition. */
+		if (s > NUM_NODES) {
+			int link = s - 1 - NUM_NODES;
+			int node = link / 2, bus = link % 2;
+			graph_disagrees = node == a->self && a->network.link_known[node][bus] &&
+				a->network.link_up[node][bus] != o->up;
+		}
+		bool in_flight = false;
+		if (a->active_request) {
+			bool active_up;
+			in_flight = event_subject(&a->active_event, &active_up) == s &&
+				active_up == o->up;
+		}
+		if (!o->seen ||
+		    ((o->reported && o->reported_up == o->up && !graph_disagrees) || in_flight) ||
 		    (uint32_t)(now_ms - o->since_ms) < hold) {
 			continue;
 		}
-		if (raft_client_report(a, subject_event(s, o->up))) {
+		if (raft_client_report(a, current)) {
 			o->reported = true;
 			o->reported_up = o->up;
 		}

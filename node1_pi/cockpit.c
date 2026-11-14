@@ -797,7 +797,8 @@ static void monitor(uint64_t now)
 
 			queue_fault(FAULT_PEER_LOST, (uint8_t)n, last + FAIL_TIMEOUT_NS); /* informational */
 		}
-		if (alive != peer_alive[n]) {
+		/* A node cut off from both buses cannot infer that its peers died. */
+		if (alive != peer_alive[n] && (alive || !deg[BUS_A] || !deg[BUS_B])) {
 			raft_node_report_event((struct raft_event){
 				alive ? RAFT_EVENT_NODE_UP : RAFT_EVENT_NODE_DOWN,
 				(uint8_t)n, RAFT_BUS_NONE, 0});

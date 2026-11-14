@@ -156,7 +156,11 @@ static void hb_mon_thread(void *p1, void *p2, void *p3)
 				bool alive = heard_within(BUS_A, node, now, FAIL_TIMEOUT_MS) ||
 					     heard_within(BUS_B, node, now, FAIL_TIMEOUT_MS);
 				atomic_set(&peer_alive[node], alive);
-				if (alive != prev_alive[node]) {
+				/* If both of our buses are degraded, missing peers says
+				 * nothing about whether those peers are actually down. */
+				if (alive != prev_alive[node] &&
+				    (alive || !hb_bus_degraded(BUS_A) ||
+				     !hb_bus_degraded(BUS_B))) {
 					raft_node_report_event((struct raft_event){
 						alive ? RAFT_EVENT_NODE_UP : RAFT_EVENT_NODE_DOWN,
 						(uint8_t)node, RAFT_BUS_NONE, 0});

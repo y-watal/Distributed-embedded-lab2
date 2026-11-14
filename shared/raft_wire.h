@@ -55,13 +55,13 @@ struct raft_ref {
 };
 
 struct raft_vote_request {
-	uint32_t term;
+	uint32_t term; /* proposed term for PRE_VOTE; current term for REQ_VOTE */
 	uint32_t last_index;
 	uint32_t last_term;
 };
 
 struct raft_vote_reply {
-	uint32_t term;
+	uint32_t term; /* echoes the proposed term for PRE_VOTE_REPLY */
 	uint8_t candidate; /* reply target */
 	uint8_t granted;   /* 0 or 1 */
 };

@@ -61,6 +61,42 @@ static void deliver_update(struct raft_agent *leader, uint8_t from, uint32_t req
 	raft_agent_receive(leader, ID_CLIENT_UPDATE(from), body, sizeof(body), now);
 }
 
+static void test_commit_stops_at_matching_prefix(void)
+{
+	struct sink k = {0};
+	struct raft_agent follower;
+	struct raft_append append = {
+		.target = NODE_N3, .term = 2, .prev_index = 0, .prev_term = 0,
+		.leader_commit = 2, .entry_count = 1, .entry_term = 1,
+		.entry = {RAFT_EVENT_NODE_UP, NODE_N2, RAFT_BUS_NONE, 0},
+	};
+	uint8_t body[RAFT_APPEND_ENTRY_LEN];
+
+	raft_agent_init(&follower, NODE_N3, sink_send, &k, 0, 3);
+	follower.last_index = 2;
+	follower.log[0].term = 1;
+	follower.log[0].event = append.entry;
+	follower.log[1].term = 1;
+	follower.log[1].event = (struct raft_event){RAFT_EVENT_CANLINK_DOWN, NODE_N3, 0, 0};
+	uint8_t len = raft_append_encode(&append, body);
+
+	raft_agent_receive(&follower, ID_APPEND(NODE_N1), body, len, 10);
+	assert(follower.commit_index == 1 && follower.applied_index == 1);
+	assert(!follower.network.link_known[NODE_N3][0]);
+
+	append.prev_index = 1;
+	append.prev_term = 1;
+	append.entry_term = 2;
+	append.entry = (struct raft_event){RAFT_EVENT_CANLINK_UP, NODE_N2, 0, 0};
+	len = raft_append_encode(&append, body);
+	raft_agent_receive(&follower, ID_APPEND(NODE_N1), body, len, 11);
+	assert(follower.commit_index == 2 && follower.applied_index == 2);
+	assert(follower.log[1].term == 2 &&
+	       follower.log[1].event.type == RAFT_EVENT_CANLINK_UP &&
+	       follower.network.link_up[NODE_N2][0] &&
+	       !follower.network.link_known[NODE_N3][0]);
+}
+
 static void test_reject_backoff(void)
 {
 	struct sink lk = {0}, ck = {0};
@@ -220,11 +256,59 @@ static void test_returning_follower_catches_up(void)
 	assert_same_committed_log(&s.nodes[NODE_N1], &s.nodes[NODE_N3]);
 }
 
+static void test_isolated_follower_does_not_raise_term(void)
+{
+	struct simulation s = {0};
+
+	for (int node = 0; node < NUM_NODES; node++) {
+		s.active[node] = true;
+		raft_agent_init(&s.nodes[node], (uint8_t)node, send_message, &s, 0,
+				(uint32_t)(200 + node * 17));
+	}
+	for (uint32_t t = 0; t <= 100; t += 5) {
+		for (int node = 0; node < NUM_NODES; node++) {
+			raft_agent_poll(&s.nodes[node], t);
+		}
+		pump(&s, t);
+	}
+	s.active[NODE_N3] = false;
+	for (uint32_t t = 105; t <= 1000; t += 5) {
+		if (t == 300) {
+			deliver_update(&s.nodes[NODE_N1], NODE_N2, 1,
+				       (struct raft_event){RAFT_EVENT_NODE_DOWN, NODE_N3,
+							   RAFT_BUS_NONE, 0}, t);
+		}
+		for (int node = 0; node < NUM_NODES; node++) {
+			raft_agent_poll(&s.nodes[node], t);
+		}
+		pump(&s, t);
+	}
+	assert(s.nodes[NODE_N3].pre_vote_active);
+	assert(s.nodes[NODE_N1].commit_index == 1 && s.nodes[NODE_N3].last_index == 0);
+	for (int node = 0; node < NUM_NODES; node++) {
+		assert(s.nodes[node].term == 1 && s.nodes[node].leader == NODE_N1);
+	}
+	s.active[NODE_N3] = true;
+	for (uint32_t t = 1005; t <= 1250; t += 5) {
+		for (int node = 0; node < NUM_NODES; node++) {
+			raft_agent_poll(&s.nodes[node], t);
+		}
+		pump(&s, t);
+	}
+	for (int node = 0; node < NUM_NODES; node++) {
+		assert(s.nodes[node].term == 1 && s.nodes[node].leader == NODE_N1);
+	}
+	assert(!s.nodes[NODE_N3].pre_vote_active);
+	assert_same_committed_log(&s.nodes[NODE_N1], &s.nodes[NODE_N3]);
+}
+
 int main(void)
 {
+	test_commit_stops_at_matching_prefix();
 	test_reject_backoff();
 	test_debounce_and_coalesce();
 	test_returning_follower_catches_up();
+	test_isolated_follower_does_not_raise_term();
 
 	struct simulation s = {0};
 	struct raft_agent early_follower;
@@ -315,5 +399,19 @@ int main(void)
 	assert(elected_at > 200 && elected_at < 1200);
 	assert(f.nodes[NODE_N2].leader == f.nodes[NODE_N3].leader);
 	assert(f.nodes[NODE_N2].term == f.nodes[NODE_N3].term);
+	assert(f.nodes[NODE_N2].term == 2);
+	/* The old leader returns in term 1 and must follow the term-2 leader. */
+	f.active[NODE_N1] = true;
+	for (uint32_t t = 1205; t <= 1500; t += 5) {
+		for (int node = 0; node < NUM_NODES; node++) {
+			raft_agent_poll(&f.nodes[node], t);
+		}
+		pump(&f, t);
+	}
+	for (int node = 0; node < NUM_NODES; node++) {
+		assert(f.nodes[node].term == 2 &&
+		       f.nodes[node].leader == f.nodes[NODE_N2].leader);
+	}
+	assert(f.nodes[NODE_N1].role == RAFT_FOLLOWER);
 	return 0;
 }

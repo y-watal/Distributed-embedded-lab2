@@ -340,8 +340,34 @@ void raft_client_get_network(const struct raft_agent *a, struct raft_network *ou
 	*out = a->network;
 }
 
+static bool candidate_log_current(const struct raft_agent *a, uint32_t last_index,
+				  uint32_t last_term)
+{
+	uint32_t own_last_term = a->last_index ? a->log[a->last_index - 1].term : 0;
+
+	return last_term > own_last_term ||
+	       (last_term == own_last_term && last_index >= a->last_index);
+}
+
+static void start_pre_vote(struct raft_agent *a)
+{
+	struct raft_vote_request m = {
+		.term = a->term + 1,
+		.last_index = a->last_index,
+		.last_term = a->last_index ? a->log[a->last_index - 1].term : 0,
+	};
+	uint8_t body[RAFT_VOTE_REQUEST_LEN];
+
+	a->pre_vote_active = true;
+	a->pre_votes = (uint8_t)(1u << a->self);
+	raft_vote_request_encode(&m, body);
+	send_body(a, ID_PRE_VOTE(a->self), body, sizeof(body));
+}
+
 void raft_agent_start_election(struct raft_agent *a)
 {
+	a->pre_vote_active = false;
+	a->pre_votes = 0;
 	a->term++;
 	a->leader = -1;
 	a->role = RAFT_CANDIDATE;
@@ -381,6 +407,7 @@ static void handle_append(struct raft_agent *a, uint8_t sender,
 		a->term = m->term;
 		a->leader = sender;
 		a->role = RAFT_FOLLOWER;
+		a->pre_vote_active = false;
 		if (new_leader) {
 			reset_election_timer(a, now_ms);
 		}
@@ -410,9 +437,11 @@ static void handle_append(struct raft_agent *a, uint8_t sender,
 				ack.success = 1;
 				ack.match_index = index;
 			}
-			if (ack.success && m->leader_commit > a->commit_index) {
-				a->commit_index = m->leader_commit < a->last_index ?
-						  m->leader_commit : a->last_index;
+			if (ack.success && m->leader_commit > a->commit_index &&
+			    ack.match_index > a->commit_index) {
+				/* Only the prefix verified by this APPEND can be committed. */
+				a->commit_index = m->leader_commit < ack.match_index ?
+						  m->leader_commit : ack.match_index;
 				apply_committed(a);
 			}
 		} else if (m->prev_index <= a->last_index) {
@@ -432,6 +461,7 @@ static void handle_append_ack(struct raft_agent *a, uint8_t sender,
 		a->role = RAFT_FOLLOWER;
 		a->leader = -1;
 		a->voted_for = -1;
+		a->pre_vote_active = false;
 		reset_election_timer(a, now_ms);
 		return;
 	}
@@ -485,6 +515,7 @@ void raft_agent_receive(struct raft_agent *a, uint32_t id, const uint8_t *body,
 	if (kind == ID_REF(0) && len == RAFT_REF_LEN) {
 		if (sender == a->leader) {
 			a->last_ref_ms = now_ms;
+			a->pre_vote_active = false;
 			reset_election_timer(a, now_ms);
 		}
 	} else if (kind == ID_CLIENT_UPDATE(0) && len == RAFT_CLIENT_UPDATE_LEN) {
@@ -521,20 +552,51 @@ void raft_agent_receive(struct raft_agent *a, uint32_t id, const uint8_t *body,
 
 		raft_append_ack_decode(body, &m);
 		handle_append_ack(a, (uint8_t)sender, &m, now_ms);
+	} else if (kind == ID_PRE_VOTE(0) && len == RAFT_VOTE_REQUEST_LEN) {
+		struct raft_vote_request m;
+		struct raft_vote_reply reply;
+		uint8_t encoded[RAFT_VOTE_REPLY_LEN];
+
+		raft_vote_request_decode(body, &m);
+		/* A current leader or a recently heard leader prevents an election. */
+		bool leader_recent = a->role == RAFT_LEADER ||
+			(a->leader >= 0 &&
+			 (uint32_t)(now_ms - a->last_ref_ms) <=
+			 RAFT_MISSED_HEARTBEATS * RAFT_HEARTBEAT_MS +
+			 RAFT_ELECTION_JITTER_MS);
+
+		reply.term = m.term;
+		reply.candidate = (uint8_t)sender;
+		reply.granted = !leader_recent && m.term > a->term &&
+			candidate_log_current(a, m.last_index, m.last_term);
+		raft_vote_reply_encode(&reply, encoded);
+		send_body(a, ID_PRE_VOTE_REPLY(a->self), encoded, sizeof(encoded));
+	} else if (kind == ID_PRE_VOTE_REPLY(0) && len == RAFT_VOTE_REPLY_LEN) {
+		struct raft_vote_reply m;
+
+		raft_vote_reply_decode(body, &m);
+		if (a->pre_vote_active && m.candidate == a->self &&
+		    m.term == a->term + 1 && m.granted) {
+			a->pre_votes |= (uint8_t)(1u << sender);
+			if (__builtin_popcount((unsigned)a->pre_votes) >=
+			    RAFT_CLUSTER_SIZE / 2 + 1) {
+				raft_agent_start_election(a);
+				reset_election_timer(a, now_ms);
+			}
+		}
 	} else if (kind == ID_REQ_VOTE(0) && len == RAFT_VOTE_REQUEST_LEN) {
 		struct raft_vote_request m;
 		struct raft_vote_reply reply;
 		uint8_t encoded[RAFT_VOTE_REPLY_LEN];
 
 		raft_vote_request_decode(body, &m);
-		bool log_current = m.last_term > (a->last_index ? a->log[a->last_index - 1].term : 0) ||
-			(m.last_term == (a->last_index ? a->log[a->last_index - 1].term : 0) &&
-			 m.last_index >= a->last_index);
+		bool log_current = candidate_log_current(a, m.last_index, m.last_term);
 		if (m.term > a->term) {
 			a->term = m.term;
 			a->role = RAFT_FOLLOWER;
 			a->leader = -1;
 			a->voted_for = -1;
+			a->pre_vote_active = false;
 			reset_election_timer(a, now_ms);
 		}
 		reply.term = a->term;
@@ -556,6 +618,7 @@ void raft_agent_receive(struct raft_agent *a, uint32_t id, const uint8_t *body,
 			a->role = RAFT_FOLLOWER;
 			a->leader = -1;
 			a->voted_for = -1;
+			a->pre_vote_active = false;
 			reset_election_timer(a, now_ms);
 			return;
 		}
@@ -576,7 +639,7 @@ void raft_agent_poll(struct raft_agent *a, uint32_t now_ms)
 {
 	if (a->election_timer_active && a->role != RAFT_LEADER &&
 	    (int32_t)(now_ms - a->election_deadline_ms) >= 0) {
-		raft_agent_start_election(a);
+		start_pre_vote(a);
 		reset_election_timer(a, now_ms);
 	}
 	if (a->role == RAFT_LEADER) {

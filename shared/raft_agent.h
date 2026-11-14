@@ -79,6 +79,8 @@ struct raft_agent {
 	uint32_t last_client_id[NUM_NODES];
 	uint32_t last_client_index[NUM_NODES];
 	uint8_t votes; /* bit per node */
+	uint8_t pre_votes; /* tentative votes, never change the current term */
+	bool pre_vote_active;
 	raft_send_fn send;
 	void *send_ctx;
 };

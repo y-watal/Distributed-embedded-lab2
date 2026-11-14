@@ -27,7 +27,7 @@ enum node_idx {
  *   CTRL, FAULT  (0x010-0x022)  brake within 100 ms
  *   REF          (0x040-0x042)  one frame at 50 Hz; latency is time-sync error
  *   HB           (0x100-0x102)  44 ms degraded-bus deadline
- *   Raft bulk    (0x140-0x156)  fragmented, retried every 100 ms or later
+ *   Raft bulk    (0x140-0x15E)  fragmented, retried every 100 ms or later
  *   BLINK, FORCE (0x200, 0x300)
  * Raft bulk sits above HB so a burst of fragments never delays a heartbeat.
  */
@@ -39,12 +39,14 @@ enum node_idx {
 #define ID_APPEND_ACK(n)    (0x14C + (n)) /* follower -> leader */
 #define ID_CLIENT_UPDATE(n) (0x150 + (n)) /* local node/link event -> leader */
 #define ID_CLIENT_REPLY(n)  (0x154 + (n)) /* commit ack or leader redirect */
-#define ID_RAFT_BULK_LAST   ID_CLIENT_REPLY(NODE_N3)
+#define ID_PRE_VOTE(n)      (0x158 + (n)) /* ask if a new election could win */
+#define ID_PRE_VOTE_REPLY(n) (0x15C + (n)) /* answer without changing term */
+#define ID_RAFT_BULK_LAST   ID_PRE_VOTE_REPLY(NODE_N3)
 /* Hardware/socket filters: REF block and the 32-ID bulk block. */
 #define RAFT_REF_FILTER_MASK  0x7FC /* 0x040-0x043 */
 #define RAFT_BULK_FILTER_MASK 0x7E0 /* 0x140-0x15F */
 /* Compact slot per Raft ID: block number * 4 + sender. REF is block 0. */
-#define RAFT_ID_SLOTS       (7 * 4)
+#define RAFT_ID_SLOTS       (9 * 4)
 
 #define FRAME_DLC 8
 #define SEQ_MASK  0x0F

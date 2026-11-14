@@ -134,12 +134,13 @@ int main(void)
 	assert(!catalog_is_raft(0x043));
 	/* Arbitration order: CTRL/FAULT < REF < HB < Raft bulk < BLINK. */
 	assert(ID_REF(2) < ID_HB(0) && ID_HB(2) < ID_REQ_VOTE(0));
-	assert(ID_CLIENT_REPLY(2) < ID_BLINK);
+	assert(ID_PRE_VOTE_REPLY(2) < ID_BLINK);
 	assert(!catalog_is_raft(ID_HB(0)) && !catalog_is_raft(ID_BLINK));
 	assert(!catalog_is_raft(ID_REQ_VOTE(0) + 3) && !catalog_is_raft(0x044));
 	{
 		const uint32_t ids[] = {ID_REF(0), ID_REQ_VOTE(0), ID_VOTE_REPLY(0), ID_APPEND(0),
-					ID_APPEND_ACK(0), ID_CLIENT_UPDATE(0), ID_CLIENT_REPLY(0)};
+					ID_APPEND_ACK(0), ID_CLIENT_UPDATE(0), ID_CLIENT_REPLY(0),
+					ID_PRE_VOTE(0), ID_PRE_VOTE_REPLY(0)};
 		bool used[RAFT_ID_SLOTS] = {false};
 
 		for (size_t k = 0; k < sizeof(ids) / sizeof(ids[0]); k++) {

@@ -64,6 +64,17 @@ static inline bool raft_route_relay(uint32_t bits, int sender, int src_bus)
 	int sender_dst_link = sender * 2 + dst_bus;
 	if ((bits & (1u << (6 + sender_dst_link))) &&
 	    (bits & (1u << (12 + sender_dst_link)))) return false;
+	/* The sender is committed off the destination bus: bridge its frames
+	 * there before anyone needs them. If a listener on that bus loses its
+	 * other link next, the hop is already in place; detecting it afterwards
+	 * left a ~60 ms gap that tripped the 66 ms peer-lost check on the bench. */
+	if (bits & (1u << (6 + sender_dst_link))) {
+		for (int node = 0; node < NUM_NODES; node++) {
+			if (node != sender && node != NODE_N2 &&
+			    raft_route_node_may_be_up(bits, node) &&
+			    raft_route_link_may_be_up(bits, node, dst_bus)) return true;
+		}
+	}
 	/* An incomplete or stale graph cannot safely suppress the Lab 3 relay. */
 	if (!raft_route_link_may_be_up(bits, sender, src_bus)) return true;
 	for (int node = 0; node < NUM_NODES; node++) {

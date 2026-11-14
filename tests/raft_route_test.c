@@ -46,6 +46,27 @@ int main(void)
 	bits = raft_route_snapshot(&n);
 	assert(!raft_route_relay(bits, NODE_N3, 0));
 	assert(!raft_route_relay(bits, NODE_N3, 1));
+	/* N1 is committed off A, so its B frames are bridged onto A before N3
+	 * needs them. Without this, pulling N3's B next left N3 deaf to N1 for
+	 * ~60 ms on the bench (N3 logged "N1 lost"). */
+	assert(raft_route_relay(bits, NODE_N1, 1));
+	assert(!raft_route_relay(bits, NODE_N1, 0)); /* no A copies to send on */
+
+	/* Checkoff orientation: N1 committed off B, N3 still on both buses. */
+	n.link_up[NODE_N1][0] = true;
+	n.link_up[NODE_N1][1] = false;
+	bits = raft_route_snapshot(&n);
+	assert(raft_route_relay(bits, NODE_N1, 0));  /* pre-emptive A -> B */
+	assert(!raft_route_relay(bits, NODE_N3, 0)); /* N3 reaches B itself */
+	assert(!raft_route_relay(bits, NODE_N3, 1));
+	/* Nobody but N2 left on B: no point bridging N1 there. */
+	n.link_up[NODE_N3][1] = false;
+	bits = raft_route_snapshot(&n);
+	assert(!raft_route_relay(bits, NODE_N1, 0));
+	n.link_up[NODE_N3][1] = true;
+	n.link_up[NODE_N1][1] = true;
+	n.link_up[NODE_N1][0] = false;
+	bits = raft_route_snapshot(&n);
 	n.link_up[NODE_N1][0] = true;
 	n.link_up[NODE_N3][1] = false;
 	bits = raft_route_snapshot(&n);

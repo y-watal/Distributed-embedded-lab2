@@ -9,6 +9,7 @@
 
 #include "raft_transport.h"
 #include "raft_route.h"
+#include "raft_status.h"
 
 #define RAFT_QUEUE_DEPTH 64
 
@@ -187,26 +188,28 @@ void raft_node_print_status(void)
 		printed = true;
 	}
 	pthread_mutex_unlock(&lock);
+	uint32_t log_hash = raft_committed_log_hash(log_snapshot, commit_index);
 	if (leader < 0) {
-		printf("  raft: term %u leader unknown %s log %u commit %u\n", term,
+		printf("  RAFT: leader=? term=%u role=%s | committed=%u total=%u | log=%08x\n", term,
 		       role == RAFT_CANDIDATE ? "CANDIDATE" : "FOLLOWER",
-		       last_index, commit_index);
+		       commit_index, last_index, log_hash);
 	} else {
-		printf("  raft: term %u leader N%d %s log %u commit %u\n", term, leader + 1,
+		printf("  RAFT: leader=N%d term=%u role=%s | committed=%u total=%u | log=%08x\n",
+		       leader + 1, term,
 		       role == RAFT_LEADER ? "LEADER" : "FOLLOWER",
-		       last_index, commit_index);
+		       commit_index, last_index, log_hash);
 	}
-	printf("  network:");
+	printf("  GRAPH:");
 	for (int n = 0; n < NUM_NODES; n++) {
-		printf(" N%d=%c A%c B%c", n + 1,
-		       network.node_known[n] ? (network.node_up[n] ? 'U' : 'D') : '?',
-		       network.link_known[n][0] ? (network.link_up[n][0] ? 'U' : 'D') : '?',
-		       network.link_known[n][1] ? (network.link_up[n][1] ? 'U' : 'D') : '?');
+		printf(" N%d:%s(A:%s B:%s)", n + 1,
+		       raft_state_text(network.node_known[n], network.node_up[n]),
+		       raft_state_text(network.link_known[n][0], network.link_up[n][0]),
+		       raft_state_text(network.link_known[n][1], network.link_up[n][1]));
 	}
-	printf(" cockpit=%c\n", network.cockpit_known ?
-	       (network.cockpit_ok ? 'U' : 'D') : '?');
+	printf(" cockpit:%s\n", !network.cockpit_known ? "?" :
+	       (network.cockpit_ok ? "OK" : "ERROR"));
 	if (print_log) {
-		printf("  raft log snapshot: %u entries, commit through %u\n",
+		printf("  LOG SNAPSHOT: %u entries, committed through #%u\n",
 		       last_index, commit_index);
 		for (uint32_t i = 0; i < last_index; i++) {
 			const struct raft_event *e = &log_snapshot[i].event;

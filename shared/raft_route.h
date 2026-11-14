@@ -59,6 +59,11 @@ static inline bool raft_route_relay(uint32_t bits, int sender, int src_bus)
 	int dst_bus = 1 - src_bus;
 
 	if (sender < 0 || sender >= NUM_NODES || sender == NODE_N2) return false;
+	/* When the sender is already on the destination bus, its own copy
+	 * reaches any destination there. N2 need not forward another copy. */
+	int sender_dst_link = sender * 2 + dst_bus;
+	if ((bits & (1u << (6 + sender_dst_link))) &&
+	    (bits & (1u << (12 + sender_dst_link)))) return false;
 	/* An incomplete or stale graph cannot safely suppress the Lab 3 relay. */
 	if (!raft_route_link_may_be_up(bits, sender, src_bus)) return true;
 	for (int node = 0; node < NUM_NODES; node++) {

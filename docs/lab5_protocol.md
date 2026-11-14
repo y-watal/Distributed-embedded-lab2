@@ -23,6 +23,9 @@ The fourth ID in each block is unused. A leader can therefore be any node.
 | `0x14C`–`0x14E` | `APPEND_ACK` | Follower confirms or rejects an append |
 | `0x150`–`0x152` | `CLIENT_UPDATE` | Client reports a local membership or application event |
 | `0x154`–`0x156` | `CLIENT_REPLY` | Leader confirms a commit or follower redirects |
+| `0x158`–`0x15A` | `PRE_VOTE` | Asks whether an election could win, without raising the term |
+| `0x15C`–`0x15E` | `PRE_VOTE_REPLY` | Grants only if no leader has been heard recently |
+| `0x160`–`0x162` | `INSTALL_SNAPSHOT` | Leader gives a follower its compacted state (see Log compaction) |
 
 A lower CAN ID wins arbitration, so the IDs follow deadlines:
 
@@ -68,7 +71,7 @@ node the transmit path also keeps Raft from delaying Lab 3 frames:
 
 Each STM32 still uses six MCP2515 receive filters: `BLINK` and `FORCE` share
 one (they differ only in bit 8), `REF` uses `0x040`/`0x7FC`, and the bulk
-block uses `0x140`/`0x7E0`. The future Raft sender must use its own bounded queue and must
+block uses `0x140`/`0x7C0` (`0x140`–`0x17F`). The future Raft sender must use its own bounded queue and must
 never block the Pi's wheel-to-`CTRL` path. Arbitration does not preempt a frame
 that is already on the wire.
 
@@ -114,7 +117,7 @@ number is **not** a log index or a Raft transfer ID.
 
 All multibyte integers in these bodies are little endian and unsigned. Terms,
 log indexes, and request IDs are 32 bits. An index is a lifetime sequence
-number, independent of the configured 30,000-entry storage capacity.
+number, independent of how many entries a node keeps (see Log compaction).
 
 | Body | Length | Fields in byte order |
 |---|---:|---|
@@ -125,6 +128,9 @@ number, independent of the configured 30,000-entry storage capacity.
 | `APPEND_ACK` | 10 | term `u32`, match index or retry index `u32`, target leader `u8`, success `u8` (0 or 1) |
 | `CLIENT_UPDATE` | 9 | target leader `u8`, client request ID `u32`, event `4 bytes` |
 | `CLIENT_REPLY` | 11 | target client `u8`, request ID `u32`, status `u8`, leader hint `u8`, committed index `u32` |
+| `PRE_VOTE` | 12 | proposed term `u32`, last log index `u32`, last log term `u32` |
+| `PRE_VOTE_REPLY` | 6 | proposed term `u32`, candidate node `u8`, granted `u8` |
+| `INSTALL_SNAPSHOT` | 21 | target node `u8`, term `u32`, snapshot index `u32`, its term `u32`, packed graph `u32`, log hash `u32` |
 
 The sender is already known from the CAN ID. `APPEND` carries at most one entry,
 so the entry's log index is `previous index + 1`. The target may be a node ID
@@ -138,6 +144,31 @@ The fragments are reassembled into one logical message before the Raft agent
 checks its term, previous index, and commit index. The protocol can carry a
 body up to 255 bytes if a later message needs more than one entry, although
 the current `APPEND` format deliberately sends one entry at a time.
+
+## Log compaction
+
+Each node keeps the newest entries in a ring of `RAFT_WORKING_LOG_ENTRIES`
+slots: 64 on the STM32s, 30,000 on the Pi (the handout's `log_size`, set in
+`node1_pi/Makefile`). When the ring is three-quarters full, a node folds its
+oldest *applied* entries into a snapshot, keeping the newest quarter as a
+tail. The snapshot is the network graph after its last entry, that entry's
+index and term, and the running FNV-1a hash of every entry through it.
+Compaction is local; no message is needed.
+
+A follower that needs an entry the leader has already compacted, for example
+one that was cut off for longer than the leader's tail, gets
+`INSTALL_SNAPSHOT`: it replaces its log through the snapshot index with the
+leader's graph and hash, acknowledges with `APPEND_ACK`, and the leader then
+sends the remaining entries one at a time as usual. The graph is packed in 20
+bits: node known 0–2, node up 3–5, link known 6–11, link up 12–17 (link =
+node × 2 + bus), cockpit known 18, cockpit OK 19.
+
+The consoles print `log=<hash>` from this running hash, so two nodes with the
+same committed log show the same value whether or not either has compacted.
+`snap=N` shows the snapshot index; only entries after it are listed. Before
+compaction the log stopped at 64 entries: the leader answered `REJECTED` to
+every update and the graph froze, which happened within a minute of link
+tests on the bench.
 
 ## Log events and membership
 
@@ -160,7 +191,8 @@ behaviour. What goes into the replicated log is debounced in
 - A flicker shorter than the hold is never logged.
 - A newer state for the same cockpit, node, or link replaces a queued one.
 - An unanswered `CLIENT_UPDATE` is resent every 100 ms. After `REJECTED`
-  (working log full) the client waits 1 s before resending.
+  (only possible if a node's whole ring is unapplied entries) the client
+  waits 1 s before resending.
 - While another entry is in flight, the leader does not answer; the client's
   normal resend covers it. The leader's own client is answered in place,
   never over CAN.

@@ -40,7 +40,7 @@ static const struct can_filter catalog_filters[] = {
 	/* BLINK 0x200 and FORCE 0x300 differ only in bit 8: one filter keeps us at six. */
 	{.id = ID_BLINK, .mask = CAN_STD_ID_MASK & ~(ID_BLINK ^ ID_FORCE)},
 	{.id = ID_REF(0), .mask = RAFT_REF_FILTER_MASK},          /* 0x040-0x043 */
-	{.id = ID_RAFT_BULK_BASE, .mask = RAFT_BULK_FILTER_MASK}, /* 0x140-0x15F */
+	{.id = ID_RAFT_BULK_BASE, .mask = RAFT_BULK_FILTER_MASK}, /* 0x140-0x17F */
 };
 
 struct canbus_stats canbus_stats;

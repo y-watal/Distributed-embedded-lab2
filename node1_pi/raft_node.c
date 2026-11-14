@@ -165,7 +165,7 @@ uint32_t raft_node_route_snapshot(void)
 void raft_node_print_status(void)
 {
 	uint32_t term, last_index, commit_index;
-	static struct raft_log_entry log_snapshot[RAFT_WORKING_LOG_ENTRIES];
+	static struct raft_log_view view;
 	static uint32_t printed_last, printed_commit;
 	static bool printed;
 	bool print_log;
@@ -181,23 +181,24 @@ void raft_node_print_status(void)
 	commit_index = agent.commit_index;
 	network = agent.network;
 	print_log = !printed || printed_last != last_index || printed_commit != commit_index;
+	uint32_t log_hash = raft_log_hash(&agent);
+	uint32_t snapshot_index = agent.snapshot_index;
 	if (print_log) {
-		memcpy(log_snapshot, agent.log, last_index * sizeof(log_snapshot[0]));
+		raft_log_view_capture(&agent, &view);
 		printed_last = last_index;
 		printed_commit = commit_index;
 		printed = true;
 	}
 	pthread_mutex_unlock(&lock);
-	uint32_t log_hash = raft_committed_log_hash(log_snapshot, commit_index);
 	if (leader < 0) {
-		printf("  RAFT: leader=? term=%u role=%s | committed=%u total=%u | log=%08x\n", term,
+		printf("  RAFT: leader=? term=%u role=%s | committed=%u total=%u | log=%08x snap=%u\n", term,
 		       role == RAFT_CANDIDATE ? "CANDIDATE" : "FOLLOWER",
-		       commit_index, last_index, log_hash);
+		       commit_index, last_index, log_hash, snapshot_index);
 	} else {
-		printf("  RAFT: leader=N%d term=%u role=%s | committed=%u total=%u | log=%08x\n",
+		printf("  RAFT: leader=N%d term=%u role=%s | committed=%u total=%u | log=%08x snap=%u\n",
 		       leader + 1, term,
 		       role == RAFT_LEADER ? "LEADER" : "FOLLOWER",
-		       commit_index, last_index, log_hash);
+		       commit_index, last_index, log_hash, snapshot_index);
 	}
 	printf("  GRAPH:");
 	for (int n = 0; n < NUM_NODES; n++) {
@@ -209,15 +210,16 @@ void raft_node_print_status(void)
 	printf(" cockpit:%s\n", !network.cockpit_known ? "?" :
 	       (network.cockpit_ok ? "OK" : "ERROR"));
 	if (print_log) {
-		printf("  LOG SNAPSHOT: %u entries, committed through #%u\n",
-		       last_index, commit_index);
-		for (uint32_t i = 0; i < last_index; i++) {
-			const struct raft_event *e = &log_snapshot[i].event;
+		printf("  LOG: #1-#%u compacted, showing #%u-#%u, committed through #%u\n",
+		       view.snapshot_index, view.first, view.last, view.commit);
+		for (uint32_t i = view.first; i <= view.last; i++) {
+			const struct raft_log_entry *le = &view.tail[i - view.first];
+			const struct raft_event *e = &le->event;
 			char bus = e->bus < 2 ? (char)('A' + e->bus) : '-';
 
 			printf("    [%u] term %u %s %s N%u bus %c value %u\n",
-			       i + 1, log_snapshot[i].term,
-			       i < commit_index ? "COMMITTED" : "PENDING",
+			       i, le->term,
+			       i <= view.commit ? "COMMITTED" : "PENDING",
 			       raft_event_name(e->type), (unsigned)e->node + 1,
 			       bus, (unsigned)e->value);
 		}

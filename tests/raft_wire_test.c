@@ -126,8 +126,22 @@ static void test_ack_and_client(void)
 	       reply_out.committed_index == reply.committed_index);
 }
 
+static void test_snapshot(void)
+{
+	struct raft_snapshot in = {.target = NODE_N3, .term = 7, .index = 123456,
+				   .last_term = 6, .state = 0xABCDE, .hash = 0xDEADBEEF}, out;
+	uint8_t body[RAFT_SNAPSHOT_LEN];
+
+	raft_snapshot_encode(&in, body);
+	raft_snapshot_decode(body, &out);
+	assert(out.target == in.target && out.term == in.term && out.index == in.index &&
+	       out.last_term == in.last_term && out.state == in.state && out.hash == in.hash);
+	assert(raft_fragment_count(RAFT_SNAPSHOT_LEN) == 5);
+}
+
 int main(void)
 {
+	test_snapshot();
 	assert(ID_CTRL < ID_FAULT(0) && ID_FAULT(2) < ID_REF(0));
 	assert(catalog_is_raft(ID_REF(NODE_N1)));
 	assert(catalog_sender(ID_APPEND(NODE_N3)) == NODE_N3);
@@ -140,7 +154,8 @@ int main(void)
 	{
 		const uint32_t ids[] = {ID_REF(0), ID_REQ_VOTE(0), ID_VOTE_REPLY(0), ID_APPEND(0),
 					ID_APPEND_ACK(0), ID_CLIENT_UPDATE(0), ID_CLIENT_REPLY(0),
-					ID_PRE_VOTE(0), ID_PRE_VOTE_REPLY(0)};
+					ID_PRE_VOTE(0), ID_PRE_VOTE_REPLY(0),
+					ID_INSTALL_SNAPSHOT(0)};
 		bool used[RAFT_ID_SLOTS] = {false};
 
 		for (size_t k = 0; k < sizeof(ids) / sizeof(ids[0]); k++) {

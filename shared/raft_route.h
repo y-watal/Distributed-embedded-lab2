@@ -59,8 +59,22 @@ static inline bool raft_route_relay(uint32_t bits, int sender, int src_bus)
 	int dst_bus = 1 - src_bus;
 
 	if (sender < 0 || sender >= NUM_NODES || sender == NODE_N2) return false;
-	/* When the sender is already on the destination bus, its own copy
-	 * reaches any destination there. N2 need not forward another copy. */
+	/* A listener committed off the source bus hears this sender only on the
+	 * destination bus. Bridge now, even though the sender reaches that bus
+	 * itself: if the sender loses it next, the listener is not left deaf
+	 * while N2 detects the hop (bench: N3 off A, then N1 off B, logged
+	 * "N1 lost"). Together with the rule below, once any node is down to
+	 * one bus a second failure in either order finds the bridge running. */
+	for (int node = 0; node < NUM_NODES; node++) {
+		int src_link = node * 2 + src_bus;
+
+		if (node != sender && node != NODE_N2 &&
+		    raft_route_node_may_be_up(bits, node) &&
+		    (bits & (1u << (6 + src_link))) && !(bits & (1u << (12 + src_link))) &&
+		    raft_route_link_may_be_up(bits, node, dst_bus)) return true;
+	}
+	/* Otherwise, when the sender is already on the destination bus, its own
+	 * copy reaches everyone there. N2 need not forward another copy. */
 	int sender_dst_link = sender * 2 + dst_bus;
 	if ((bits & (1u << (6 + sender_dst_link))) &&
 	    (bits & (1u << (12 + sender_dst_link)))) return false;

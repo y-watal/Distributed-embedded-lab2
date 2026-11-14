@@ -40,39 +40,46 @@ int main(void)
 	assert(raft_route_live_hop(100, heard, NODE_N1, 0, 44));
 	assert(raft_route_live_hop(100, heard, NODE_N3, 1, 44));
 
-	/* One missing link needs no bridge: N3 sends directly on both buses.
-	 * This was previously relayed onto B because N1 was missing A. */
+	/*
+	 * One missing link: once N1 is committed off A, N2 bridges in both
+	 * directions before a second failure, so either pull order finds the
+	 * hop already running (bench: each order alone left a ~60 ms gap that
+	 * tripped the 66 ms peer-lost check). Earlier these were not relayed.
+	 */
 	n.link_up[NODE_N1][0] = false;
 	bits = raft_route_snapshot(&n);
-	assert(!raft_route_relay(bits, NODE_N3, 0));
-	assert(!raft_route_relay(bits, NODE_N3, 1));
-	/* N1 is committed off A, so its B frames are bridged onto A before N3
-	 * needs them. Without this, pulling N3's B next left N3 deaf to N1 for
-	 * ~60 ms on the bench (N3 logged "N1 lost"). */
-	assert(raft_route_relay(bits, NODE_N1, 1));
+	assert(raft_route_relay(bits, NODE_N1, 1));  /* N1 off A: its B frames -> A */
 	assert(!raft_route_relay(bits, NODE_N1, 0)); /* no A copies to send on */
+	assert(raft_route_relay(bits, NODE_N3, 0));  /* N1 hears N3 only on B */
+	assert(!raft_route_relay(bits, NODE_N3, 1)); /* nobody needs N3's B on A */
 
 	/* Checkoff orientation: N1 committed off B, N3 still on both buses. */
 	n.link_up[NODE_N1][0] = true;
 	n.link_up[NODE_N1][1] = false;
 	bits = raft_route_snapshot(&n);
-	assert(raft_route_relay(bits, NODE_N1, 0));  /* pre-emptive A -> B */
-	assert(!raft_route_relay(bits, NODE_N3, 0)); /* N3 reaches B itself */
-	assert(!raft_route_relay(bits, NODE_N3, 1));
+	assert(raft_route_relay(bits, NODE_N1, 0));  /* covers N3 losing A next */
+	assert(raft_route_relay(bits, NODE_N3, 1));  /* covers N3 losing A next, for N1 */
+	assert(!raft_route_relay(bits, NODE_N3, 0));
 	/* Nobody but N2 left on B: no point bridging N1 there. */
 	n.link_up[NODE_N3][1] = false;
 	bits = raft_route_snapshot(&n);
 	assert(!raft_route_relay(bits, NODE_N1, 0));
-	n.link_up[NODE_N3][1] = true;
+
+	/* Reverse order: N3 committed off A first, N1 on both buses. Bridging
+	 * N1's A traffic to B now covers N1 losing B next. */
 	n.link_up[NODE_N1][1] = true;
-	n.link_up[NODE_N1][0] = false;
-	bits = raft_route_snapshot(&n);
-	n.link_up[NODE_N1][0] = true;
-	n.link_up[NODE_N3][1] = false;
-	bits = raft_route_snapshot(&n);
-	assert(!raft_route_relay(bits, NODE_N1, 0));
-	assert(!raft_route_relay(bits, NODE_N1, 1));
+	n.link_up[NODE_N3][0] = false;
 	n.link_up[NODE_N3][1] = true;
+	bits = raft_route_snapshot(&n);
+	assert(raft_route_relay(bits, NODE_N1, 0));  /* N3 hears N1 only on B */
+	assert(raft_route_relay(bits, NODE_N3, 1));  /* N3 is off A: its B -> A */
+	assert(!raft_route_relay(bits, NODE_N1, 1));
+	n.link_up[NODE_N3][0] = true;
+
+	/* All links up again: nothing is relayed. */
+	bits = raft_route_snapshot(&n);
+	assert(!raft_route_relay(bits, NODE_N1, 0) && !raft_route_relay(bits, NODE_N1, 1));
+	assert(!raft_route_relay(bits, NODE_N3, 0) && !raft_route_relay(bits, NODE_N3, 1));
 
 	/* N1-A -> N2 relay -> N3-B is the two-link hop. */
 	n.link_up[NODE_N1][1] = false;

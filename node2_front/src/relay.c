@@ -31,15 +31,20 @@ K_SEM_DEFINE(relay_due, 0, RELAY_QUEUE_DEPTH + RELAY_URGENT_DEPTH);
 K_THREAD_STACK_DEFINE(relay_stack, RELAY_STACK_SIZE);
 static struct k_thread relay_data;
 
+/* CTRL and FAULT: relayed ahead of everything else. */
+static bool is_urgent(const struct can_frame *frame)
+{
+	return frame->id == ID_CTRL ||
+	       (frame->id >= ID_FAULT(0) && frame->id < ID_FAULT(NUM_NODES));
+}
+
 /* Dispatch thread, first copy only: hand it to RELAY without waiting. */
 static void relay_hook(const struct can_frame *frame, int bus)
 {
 	struct relay_item item = {
 		.src_bus = (uint8_t)bus, .t_rx = canbus_rx_cycles(), .frame = *frame};
 
-	bool urgent = frame->id == ID_CTRL ||
-		      (frame->id >= ID_FAULT(0) && frame->id < ID_FAULT(NUM_NODES));
-	struct k_msgq *queue = urgent ? &relay_urgent_q : &relay_q;
+	struct k_msgq *queue = is_urgent(frame) ? &relay_urgent_q : &relay_q;
 
 	if (k_msgq_put(queue, &item, K_NO_WAIT) != 0) {
 		atomic_inc(&relay_stats.dropped);
@@ -67,6 +72,49 @@ static bool should_relay(const struct relay_item *item)
 		item->src_bus, DEG_TIMEOUT_MS);
 }
 
+static void forward(const struct relay_item *item);
+
+/* Forward urgent frames that arrived while a lower-priority frame waits. */
+static void drain_urgent(void)
+{
+	struct relay_item urgent;
+
+	while (k_msgq_get(&relay_urgent_q, &urgent, K_NO_WAIT) == 0) {
+		(void)k_sem_take(&relay_due, K_NO_WAIT); /* its count */
+		forward(&urgent);
+	}
+}
+
+/*
+ * Retry while every MCP2515 TX buffer is busy instead of dropping the frame
+ * (RELAY_RAFT_WAIT_US / RELAY_LAB3_WAIT_US). Non-urgent frames let queued
+ * CTRL and FAULT go first between retries; urgent ones never drain, so this
+ * cannot recurse more than one level.
+ */
+static int send_relay(int dst, const struct relay_item *item, bool let_urgent_pass)
+{
+	uint32_t limit = catalog_is_raft(item->frame.id) ? RELAY_RAFT_WAIT_US
+							 : RELAY_LAB3_WAIT_US;
+	uint32_t start = k_cycle_get_32();
+
+	for (;;) {
+		int ret = canbus_forward_try(dst, &item->frame, item->t_rx);
+
+		if (ret != -EAGAIN) {
+			return ret;
+		}
+		if (k_cyc_to_us_floor32(k_cycle_get_32() - start) >= limit) {
+			canbus_note_tx_full(dst);
+			atomic_inc(&relay_stats.full);
+			return ret;
+		}
+		if (let_urgent_pass) {
+			drain_urgent();
+		}
+		k_sleep(K_USEC(100));
+	}
+}
+
 static void forward(const struct relay_item *item)
 {
 	int dst = item->src_bus == BUS_A ? BUS_B : BUS_A;
@@ -80,7 +128,7 @@ static void forward(const struct relay_item *item)
 		return;
 	}
 	tp_toggle(TP_RELAY_TX);
-	if (canbus_forward_at(dst, &item->frame, item->t_rx) == 0) {
+	if (send_relay(dst, item, !is_urgent(&item->frame)) == 0) {
 		atomic_inc(&relay_stats.forwarded);
 	}
 }
@@ -94,13 +142,8 @@ static void forward(const struct relay_item *item)
 static bool wait_raft_room(int dst)
 {
 	uint32_t start = k_cycle_get_32();
-	struct relay_item urgent;
-
 	while (!canbus_raft_tx_ready(dst)) {
-		while (k_msgq_get(&relay_urgent_q, &urgent, K_NO_WAIT) == 0) {
-			(void)k_sem_take(&relay_due, K_NO_WAIT); /* its count */
-			forward(&urgent);
-		}
+		drain_urgent();
 		if (k_cyc_to_us_floor32(k_cycle_get_32() - start) >= RAFT_TX_RESERVE_WAIT_US) {
 			return false;
 		}

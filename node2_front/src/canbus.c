@@ -419,6 +419,31 @@ int canbus_forward_at(int bus, const struct can_frame *frame, uint32_t release)
 	return queue_on(bus, frame, release, true, K_NO_WAIT);
 }
 
+int canbus_forward_try(int bus, const struct can_frame *frame, uint32_t release)
+{
+	if (!bus_running[bus]) {
+		return -ENETDOWN;
+	}
+	if (atomic_get(&bus_degraded[bus])) {
+		atomic_inc(&canbus_stats.bus[bus].tx_skipped);
+		return -ENETUNREACH;
+	}
+	int ret = send_counted(bus, frame, K_NO_WAIT);
+
+	if (ret == 0) {
+		tp_toggle(tp_tx[bus]);
+		jit_note(frame->id, bus, release, true);
+	} else if (ret != -EAGAIN) {
+		atomic_inc(&canbus_stats.bus[bus].tx_err);
+	}
+	return ret;
+}
+
+void canbus_note_tx_full(int bus)
+{
+	atomic_inc(&canbus_stats.bus[bus].tx_full);
+}
+
 void canbus_flush(int bus)
 {
 	if (!bus_running[bus]) {

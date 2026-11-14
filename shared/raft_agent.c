@@ -119,6 +119,18 @@ static void reply_client(struct raft_agent *a, uint8_t target, uint32_t request_
 	send_body(a, ID_CLIENT_REPLY(a->self), body, sizeof(body));
 }
 
+/* Remember where the leader committed the active report (see RAFT_REPAIR_SETTLE_MS). */
+static void client_settle(struct raft_agent *a, uint32_t index, uint32_t now_ms)
+{
+	bool up;
+	int subject = event_subject(&a->active_event, &up);
+
+	if (subject >= 0) {
+		a->obs[subject].settle_index = index;
+		a->obs[subject].settle_ms = now_ms;
+	}
+}
+
 /* The leader's own client is answered in place instead of over CAN. */
 static void client_result(struct raft_agent *a, uint8_t client, uint32_t request_id,
 			  enum raft_client_status status, uint32_t index)
@@ -131,6 +143,8 @@ static void client_result(struct raft_agent *a, uint8_t client, uint32_t request
 		return;
 	}
 	if (status == RAFT_CLIENT_COMMITTED) {
+		/* The leader applies at commit, so the settle wait ends at once. */
+		client_settle(a, index, a->last_client_send_ms);
 		a->active_request = false;
 	} else if (status == RAFT_CLIENT_REJECTED) {
 		a->client_retry_ms = RAFT_CLIENT_REJECT_BACKOFF_MS;
@@ -349,6 +363,11 @@ static void client_debounce(struct raft_agent *a, uint32_t now_ms)
 			int node = link / 2, bus = link % 2;
 			graph_disagrees = node == a->self && a->network.link_known[node][bus] &&
 				a->network.link_up[node][bus] != o->up;
+			/* The leader already committed our report: wait to apply it. */
+			if (graph_disagrees && a->applied_index < o->settle_index &&
+			    (uint32_t)(now_ms - o->settle_ms) < RAFT_REPAIR_SETTLE_MS) {
+				graph_disagrees = false;
+			}
 		}
 		bool in_flight = false;
 		if (a->active_request) {
@@ -563,6 +582,7 @@ void raft_agent_receive(struct raft_agent *a, uint32_t id, const uint8_t *body,
 		if (m.target == a->self && a->active_request &&
 		    m.request_id == a->active_request_id) {
 			if (m.status == RAFT_CLIENT_COMMITTED) {
+				client_settle(a, m.committed_index, now_ms);
 				a->active_request = false;
 			} else if (m.status == RAFT_CLIENT_REDIRECT && m.leader < NUM_NODES) {
 				a->leader = (int8_t)m.leader;

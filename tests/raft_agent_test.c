@@ -360,8 +360,66 @@ static void test_isolated_follower_does_not_raise_term(void)
 	assert_same_committed_log(&s.nodes[NODE_N1], &s.nodes[NODE_N3]);
 }
 
+/*
+ * Far side of a hop: N3 sees its own A link go down and the leader commits
+ * the report, but the APPEND carrying it has not reached N3 yet. N3 must not
+ * re-send the report as a graph repair on every reply (seen on hardware as
+ * about 10 CLIENT_UPDATEs per second) - at most once per settle period.
+ */
+static void test_repair_waits_for_committed_entry(void)
+{
+	struct sink k = {0};
+	struct raft_agent a;
+	const struct raft_event down = {RAFT_EVENT_CANLINK_DOWN, NODE_N3, 0, 0};
+	uint32_t t;
+
+	raft_agent_init(&a, NODE_N3, sink_send, &k, 0, 9);
+	/* Committed graph (log 19) still says N3's link A is up. */
+	a.network.link_known[NODE_N3][0] = true;
+	a.network.link_up[NODE_N3][0] = true;
+	a.commit_index = a.applied_index = a.last_index = 19;
+
+	raft_client_observe(&a, down, 0);
+	for (t = 0; t <= RAFT_REPORT_DOWN_HOLD_MS; t += 5) {
+		raft_agent_poll(&a, t);
+	}
+	assert(a.active_request && k.updates == 1);
+
+	/* The leader answers COMMITTED at index 20; N3 never receives entry 20. */
+	struct raft_client_reply r = {.target = NODE_N3, .request_id = a.active_request_id,
+				      .status = RAFT_CLIENT_COMMITTED, .leader = NODE_N1,
+				      .committed_index = 20};
+	uint8_t body[RAFT_CLIENT_REPLY_LEN];
+
+	raft_client_reply_encode(&r, body);
+	raft_agent_receive(&a, ID_CLIENT_REPLY(NODE_N1), body, sizeof(body), t);
+	assert(!a.active_request);
+	uint32_t replied = t;
+
+	for (; t < replied + RAFT_REPAIR_SETTLE_MS - 5; t += 5) {
+		raft_agent_poll(&a, t);
+	}
+	assert(k.updates == 1); /* held while waiting for entry 20 */
+
+	/* After the settle period the repair is allowed again, once. */
+	for (; t <= replied + RAFT_REPAIR_SETTLE_MS + 50; t += 5) {
+		raft_agent_poll(&a, t);
+	}
+	assert(k.updates == 2);
+
+	/* Once entry 20 is applied the graph agrees and nothing more is sent. */
+	a.network.link_up[NODE_N3][0] = false;
+	a.applied_index = a.commit_index = a.last_index = 20;
+	a.active_request = false;
+	for (t += 5; t < replied + 3 * RAFT_REPAIR_SETTLE_MS; t += 5) {
+		raft_agent_poll(&a, t);
+	}
+	assert(k.updates == 2);
+}
+
 int main(void)
 {
+	test_repair_waits_for_committed_entry();
 	test_commit_stops_at_matching_prefix();
 	test_reject_backoff();
 	test_debounce_and_coalesce();

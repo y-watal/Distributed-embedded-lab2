@@ -36,6 +36,8 @@ struct raft_observation {
 	bool reported;    /* a debounced value has been queued */
 	bool reported_up; /* that value */
 	uint32_t since_ms;
+	uint32_t settle_index; /* leader said COMMITTED at this index */
+	uint32_t settle_ms;    /* when that reply arrived */
 };
 
 /* Sends one complete logical body. The platform adapter fragments it for CAN. */

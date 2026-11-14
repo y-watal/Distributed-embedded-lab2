@@ -105,11 +105,12 @@ static void report_thread(void *p1, void *p2, void *p3)
 		printk(" | dup %ld echo %ld rxdrop %ld", (long)atomic_clear(&s->duplicates),
 		       (long)atomic_clear(&s->own_echo), (long)atomic_clear(&s->rx_dropped));
 		if (RELAY_ENABLED) {
-			printk(" | relay %ld skip %ld drop %ld raftlate %ld",
+			printk(" | relay %ld skip %ld drop %ld raftlate %ld full %ld",
 			       (long)atomic_clear(&relay_stats.forwarded),
 			       (long)atomic_clear(&relay_stats.skipped),
 			       (long)atomic_clear(&relay_stats.dropped),
-			       (long)atomic_clear(&relay_stats.raft_late));
+			       (long)atomic_clear(&relay_stats.raft_late),
+			       (long)atomic_clear(&relay_stats.full));
 		}
 		printk("\n");
 

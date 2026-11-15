@@ -153,12 +153,21 @@ frame from sender S, received on bus X, onto the other bus Y if and only if,
 in its committed graph:
 
 1. it is the **bridge** for S: the lowest-ID live node other than S with both
-   links up (every node computes the same answer, so exactly one relays);
-2. S is not known to be on Y; and
-3. some live node other than S and itself is committed **off** X but may be
+   links up (every node computes the same answer, so exactly one relays); and
+2. some live node other than S and itself is committed **off** X but may be
    on Y, so it cannot hear S any other way.
 
-With all links up, or with one link down, nothing is relayed. In the checkoff
+S's own link on Y is deliberately not checked. A node that has just lost Y
+can only report that through this relay, so trusting its stale "on Y" entry
+deadlocked the hop when N1 lost B before N3 lost A. The cost: while exactly
+one link is down (say N1 off B), N2 and N3 each copy the other's bus B frames
+onto A, where they are duplicates that receivers discard.
+
+A committed `NODE_DOWN` marks the node down but keeps its last link states, so
+a false `NODE_DOWN` (a hop forming slower than the 66 ms peer-lost timeout)
+heals with the following `NODE_UP` instead of leaving the node with no links.
+
+With all links up nothing is relayed. In the checkoff
 hop (N1 off B, N3 off A) N2 is the bridge in both directions; with N2 off A
 and N3 off B the Pi bridges; with N1 off A and N2 off B, N3 does. Nothing is
 relayed for a link change until it commits, so a hop takes a few rounds to

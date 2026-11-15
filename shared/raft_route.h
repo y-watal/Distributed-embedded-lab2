@@ -84,11 +84,15 @@ static inline bool raft_route_link_known_down(uint32_t bits, int node, int bus)
 /*
  * Graph-only relay decision, identical on every node. self forwards a frame
  * from sender, received on src_bus, onto the other bus if and only if:
- *   - self is the bridge for that sender (raft_route_bridge);
- *   - the sender is not known to be on the other bus itself; and
+ *   - self is the bridge for that sender (raft_route_bridge); and
  *   - some live node other than the sender and self is committed off
  *     src_bus but may be on the other bus, so it cannot hear the frame
  *     any other way.
+ * The sender's own link on the other bus is deliberately not consulted. A
+ * node that just lost that link can only report it through this relay, so
+ * trusting the stale "sender is on the other bus" deadlocked the hop when
+ * N1 lost B before N3 lost A. The cost is a duplicate copy while exactly one
+ * link is down; receivers already discard duplicates.
  * Until a link change is committed nothing is relayed for it; the handout
  * (Part 5.2) expects a few rounds before the routes are set up.
  */
@@ -98,9 +102,6 @@ static inline bool raft_route_relay(uint32_t bits, int self, int sender, int src
 
 	if (sender < 0 || sender >= NUM_NODES || sender == self) return false;
 	if (raft_route_bridge(bits, sender) != self) return false;
-	int sender_dst_link = sender * 2 + dst_bus;
-	if ((bits & (1u << (6 + sender_dst_link))) &&
-	    (bits & (1u << (12 + sender_dst_link)))) return false;
 	for (int node = 0; node < NUM_NODES; node++) {
 		if (node != sender && node != self &&
 		    raft_route_node_may_be_up(bits, node) &&

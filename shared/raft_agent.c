@@ -20,12 +20,13 @@ static void apply_event(struct raft_network *n, const struct raft_event *e)
 			n->node_up[e->node] = true;
 			n->node_known[e->node] = true;
 		} else if (e->type == RAFT_EVENT_NODE_DOWN) {
+			/* Links keep their last committed state: routing already skips a
+			 * node that is down, and a NODE_DOWN that turns out false (a
+			 * hop forming slower than the peer-lost timeout) must not leave
+			 * the node with no links after its NODE_UP, or nothing is ever
+			 * relayed to it again. */
 			n->node_up[e->node] = false;
 			n->node_known[e->node] = true;
-			n->link_up[e->node][0] = false;
-			n->link_up[e->node][1] = false;
-			n->link_known[e->node][0] = true;
-			n->link_known[e->node][1] = true;
 		} else if (e->bus < 2 && e->type == RAFT_EVENT_CANLINK_UP) {
 			n->link_up[e->node][e->bus] = true;
 			n->link_known[e->node][e->bus] = true;

@@ -97,6 +97,42 @@ static void test_commit_stops_at_matching_prefix(void)
 	       !follower.network.link_known[NODE_N3][0]);
 }
 
+/* Bench 19:19:04: a false NODE_DOWN N3 then NODE_UP N3 committed while N3
+ * stayed on B. The node must come back with its last link states, not with
+ * both links down (which stopped every relay toward it). */
+static void test_node_down_keeps_links(void)
+{
+	struct sink k = {0};
+	struct raft_agent f;
+	const struct raft_event events[] = {
+		{RAFT_EVENT_CANLINK_UP, NODE_N3, 1, 0},
+		{RAFT_EVENT_CANLINK_DOWN, NODE_N3, 0, 0},
+		{RAFT_EVENT_NODE_DOWN, NODE_N3, RAFT_BUS_NONE, 0},
+		{RAFT_EVENT_NODE_UP, NODE_N3, RAFT_BUS_NONE, 0},
+	};
+	uint8_t body[RAFT_APPEND_ENTRY_LEN];
+
+	raft_agent_init(&f, NODE_N2, sink_send, &k, 0, 3);
+	for (uint32_t i = 0; i < 4; i++) {
+		struct raft_append m = {
+			.target = NODE_N2, .term = 1, .prev_index = i,
+			.prev_term = i ? 1 : 0, .leader_commit = i + 1,
+			.entry_count = 1, .entry_term = 1, .entry = events[i],
+		};
+		uint8_t len = raft_append_encode(&m, body);
+
+		raft_agent_receive(&f, ID_APPEND(NODE_N1), body, len, 10 + i);
+		assert(f.applied_index == i + 1);
+		if (i == 2) { /* down, links remembered */
+			assert(f.network.node_known[NODE_N3] && !f.network.node_up[NODE_N3]);
+			assert(f.network.link_up[NODE_N3][1] && !f.network.link_up[NODE_N3][0]);
+		}
+	}
+	assert(f.network.node_up[NODE_N3]);
+	assert(f.network.link_known[NODE_N3][0] && !f.network.link_up[NODE_N3][0]);
+	assert(f.network.link_known[NODE_N3][1] && f.network.link_up[NODE_N3][1]);
+}
+
 static void test_reject_backoff(void)
 {
 	struct sink lk = {0}, ck = {0};
@@ -219,8 +255,8 @@ static void test_recovery_cancels_stale_loss_and_repairs_graph(void)
 	raft_agent_poll(&client, 60 + RAFT_REPORT_UP_HOLD_MS);
 	assert(client.active_request && client.active_event.type == RAFT_EVENT_NODE_UP);
 
-	/* A committed NODE_DOWN also marked both links down. Stable local
-	 * link-up observations must restore them without a new physical edge. */
+	/* If the graph shows our own link down (a stale entry), stable local
+	 * link-up observations must restore it without a new physical edge. */
 	client.active_request = false;
 	raft_client_observe(&client,
 		(struct raft_event){RAFT_EVENT_CANLINK_UP, NODE_N3, 0, 0}, 200);
@@ -550,6 +586,7 @@ int main(void)
 	test_lagging_follower_gets_snapshot();
 	test_repair_waits_for_committed_entry();
 	test_commit_stops_at_matching_prefix();
+	test_node_down_keeps_links();
 	test_reject_backoff();
 	test_debounce_and_coalesce();
 	test_stale_peer_loss_is_rejected();

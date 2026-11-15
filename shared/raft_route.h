@@ -50,8 +50,12 @@ static inline bool raft_route_send_on_bus(uint32_t bits, int self, int bus,
 {
 	/* Never trust a stale graph over the only locally usable bus. */
 	if (!other_usable || !raft_route_has_peer(bits, self, 1 - bus)) return true;
-	return raft_route_link_may_be_up(bits, self, bus) &&
-	       raft_route_has_peer(bits, self, bus);
+	/* The graph decides only whether anyone is reachable on this bus. Our
+	 * own link is a local fact the caller already checked (bus running, not
+	 * degraded): trusting the graph for it deadlocked N3 on the bench, whose
+	 * stale graph marked its own links down, so it stopped sending the very
+	 * acks that would have brought the graph up to date. */
+	return raft_route_has_peer(bits, self, bus);
 }
 
 /*

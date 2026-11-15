@@ -50,12 +50,14 @@ static void test_send_on_bus(void)
 	assert(raft_route_send_on_bus(bits, NODE_N1, 0, true));
 	assert(raft_route_send_on_bus(bits, NODE_N1, 1, true));
 
-	/* N1 off B: send on A only, unless A is unusable locally. */
+	/* Graph says N1 is off B. Whether N1's B link works is the caller's
+	 * local check (it skips a degraded bus first); the graph only says N2
+	 * is still reachable on B, so B stays allowed. */
 	n.link_up[NODE_N1][1] = false;
 	n.link_up[NODE_N3][0] = false;
 	bits = raft_route_snapshot(&n);
 	assert(raft_route_send_on_bus(bits, NODE_N1, 0, true));
-	assert(!raft_route_send_on_bus(bits, NODE_N1, 1, true));
+	assert(raft_route_send_on_bus(bits, NODE_N1, 1, true));
 	assert(raft_route_send_on_bus(bits, NODE_N1, 1, false));
 
 	/* When B reaches nobody, data traffic uses A. */
@@ -65,6 +67,18 @@ static void test_send_on_bus(void)
 	bits = raft_route_snapshot(&n);
 	assert(raft_route_send_on_bus(bits, NODE_N1, 0, true));
 	assert(!raft_route_send_on_bus(bits, NODE_N1, 1, true));
+
+	/* Bench deadlock: N3's committed graph marked N3 itself down on both
+	 * buses while both its links worked. It must still send wherever peers
+	 * are reachable, or its acks never reach the leader and the graph can
+	 * never be corrected. */
+	all_up(&n);
+	n.node_up[NODE_N3] = false;
+	n.link_up[NODE_N3][0] = n.link_up[NODE_N3][1] = false;
+	n.link_up[NODE_N1][1] = false;
+	bits = raft_route_snapshot(&n);
+	assert(raft_route_send_on_bus(bits, NODE_N3, 0, true)); /* N1, N2 on A */
+	assert(raft_route_send_on_bus(bits, NODE_N3, 1, true)); /* N2 on B */
 
 	/* A stale graph with no paths must not block recovery traffic. */
 	memset(&n, 0, sizeof(n));

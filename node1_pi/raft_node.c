@@ -23,6 +23,8 @@ struct raft_work {
 static struct raft_agent agent;
 static struct raft_transport transport;
 static atomic_uint route_snapshot;
+/* bits 0-7: leader + 1 (0 = unknown); bit 8: this node leads */
+static atomic_uint leader_snapshot;
 static pi_raft_emit_fn emit_can;
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t wake = PTHREAD_COND_INITIALIZER;
@@ -106,6 +108,8 @@ static void *raft_worker(void *arg)
 		raft_agent_poll(&agent, now);
 		atomic_store_explicit(&route_snapshot, raft_route_snapshot(&agent.network),
 			memory_order_relaxed);
+		atomic_store_explicit(&leader_snapshot, (unsigned)((agent.leader + 1) |
+			(agent.role == RAFT_LEADER ? 0x100 : 0)), memory_order_relaxed);
 		pthread_mutex_unlock(&lock);
 	}
 	return NULL;
@@ -126,6 +130,8 @@ int raft_node_init(pi_raft_emit_fn emit)
 		       agent.leader + 1,
 		       agent.role == RAFT_LEADER ? "LEADER" : "FOLLOWER");
 	}
+	atomic_store(&leader_snapshot, (unsigned)((agent.leader + 1) |
+		(agent.role == RAFT_LEADER ? 0x100 : 0)));
 	if (pthread_create(&worker, NULL, raft_worker, NULL) != 0) {
 		return -1;
 	}
@@ -160,6 +166,14 @@ void raft_node_get_network(struct raft_network *out)
 uint32_t raft_node_route_snapshot(void)
 {
 	return atomic_load_explicit(&route_snapshot, memory_order_relaxed);
+}
+
+void raft_node_leader_snapshot(int *leader, bool *is_leader)
+{
+	unsigned v = atomic_load_explicit(&leader_snapshot, memory_order_relaxed);
+
+	*leader = (int)(v & 0xFF) - 1;
+	*is_leader = (v & 0x100) != 0;
 }
 
 void raft_node_print_status(void)

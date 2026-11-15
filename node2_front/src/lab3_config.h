@@ -99,6 +99,16 @@
 #define RAFT_TX_MAX_INFLIGHT    2
 #define RAFT_TX_RESERVE_WAIT_US 1000
 
+/*
+ * A relayed Raft fragment retries for a TX buffer for up to this long, in
+ * RELAY_RAFT_TRY_US slices with relayed CTRL/FAULT forwarded between them.
+ * Sending relayed fragments with K_NO_WAIT lost 13-42 frames/s on bus B
+ * during the hop, and losing one fragment loses the whole message: N3 never
+ * received the 6-fragment APPEND for entry 20 and its log stalled for 28 s.
+ */
+#define RELAY_RAFT_TX_WAIT_US   2000
+#define RELAY_RAFT_TRY_US       250
+
 #define PRIO_RELAY    3
 #define PRIO_DISPATCH 4
 #define PRIO_DRIVE    5 /* N3: acts on CTRL (brake path, local deadline 0.5 ms) */
@@ -106,6 +116,7 @@
 #define PRIO_BLINK    5 /* BLINK_F / BLINK_R: 0.5 ms from reception */
 #define PRIO_TEST_BTN 5 /* local fail within 10 ms (R2.5) */
 #define PRIO_PID      6 /* N3: speed loop every 10 ms */
+#define PRIO_PPS      6 /* Lab 5: spins <= 0.4 ms onto each global second; below the brake path */
 #define PRIO_HB_TX    7
 #define PRIO_HB_MON   8 /* also runs the zone state machine and feeds the watchdog */
 #define PRIO_FORCE    9 /* N2: FORCE every 50 ms */

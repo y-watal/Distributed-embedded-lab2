@@ -25,6 +25,10 @@ const struct gpio_dt_spec tp_pins[TP_COUNT] = {
 	[TP_PWM_SET] = TP_SPEC(pwm_set_gpios),
 	[TP_DIR_A] = TP_SPEC(dir_a_gpios),
 	[TP_SRV] = TP_SPEC(srv_gpios),
+	[TP_PPS] = TP_SPEC(pps_gpios),
+	[TP_SYNC] = TP_SPEC(sync_gpios),
+	[TP_LEADER] = TP_SPEC(leader_gpios),
+	[TP_REF_RX] = TP_SPEC(ref_rx_gpios),
 };
 
 static const char *const tp_names[TP_COUNT] = {
@@ -33,6 +37,8 @@ static const char *const tp_names[TP_COUNT] = {
 	[TP_ERR] = "ERR",           [TP_FL] = "FL",             [TP_FR] = "FR",
 	[TP_RL] = "RL",             [TP_RR] = "RR",             [TP_RELAY_TX] = "RELAY_TX",
 	[TP_PWM_SET] = "PWM_SET",   [TP_DIR_A] = "DIR_A",       [TP_SRV] = "SRV",
+	[TP_PPS] = "PPS",           [TP_SYNC] = "SYNC",         [TP_LEADER] = "LEADER",
+	[TP_REF_RX] = "REF_RX",
 };
 
 int tp_init(void)

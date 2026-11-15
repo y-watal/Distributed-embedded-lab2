@@ -14,6 +14,7 @@ struct relay_stats {
 	atomic_t skipped; /* destination bus degraded or down */
 	atomic_t dropped; /* relay queue full */
 	atomic_t raft_late; /* Raft fragment relayed without the reserve (wait ran out) */
+	atomic_t raft_lost; /* Raft fragment not relayed: no TX buffer in RELAY_RAFT_TX_WAIT_US */
 };
 
 extern struct relay_stats relay_stats;

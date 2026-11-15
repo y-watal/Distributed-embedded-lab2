@@ -350,6 +350,15 @@ static void client_debounce(struct raft_agent *a, uint32_t now_ms)
 			graph_disagrees = node == a->self && a->network.link_known[node][bus] &&
 				a->network.link_up[node][bus] != o->up;
 		}
+		/* The leader already answered COMMITTED for this subject, so its
+		 * log has the entry and this node simply has not applied it yet
+		 * (for example a lost APPEND fragment). Re-reporting at once only
+		 * loads the bus: N3 re-sent CANLINK_DOWN ~10 times a second. */
+		if (graph_disagrees && o->committed_index &&
+		    a->applied_index < o->committed_index &&
+		    (uint32_t)(now_ms - o->committed_ms) < RAFT_CLIENT_REPAIR_HOLD_MS) {
+			graph_disagrees = false;
+		}
 		bool in_flight = false;
 		if (a->active_request) {
 			bool active_up;
@@ -563,6 +572,13 @@ void raft_agent_receive(struct raft_agent *a, uint32_t id, const uint8_t *body,
 		if (m.target == a->self && a->active_request &&
 		    m.request_id == a->active_request_id) {
 			if (m.status == RAFT_CLIENT_COMMITTED) {
+				bool up;
+				int subject = event_subject(&a->active_event, &up);
+
+				if (subject >= 0) {
+					a->obs[subject].committed_index = m.committed_index;
+					a->obs[subject].committed_ms = now_ms;
+				}
 				a->active_request = false;
 			} else if (m.status == RAFT_CLIENT_REDIRECT && m.leader < NUM_NODES) {
 				a->leader = (int8_t)m.leader;

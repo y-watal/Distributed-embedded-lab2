@@ -8,6 +8,7 @@ target_include_directories(app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../shared)
 target_sources(app PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../shared/raft_agent.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../shared/raft_transport.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../shared/timesync.c
     # shared with node2_front (identical files)
     src/main.c
     src/blink.c
@@ -16,6 +17,7 @@ target_sources(app PRIVATE
     src/ctrl.c
     src/current_sensor.c
     src/evlog.c
+    src/gtime.c
     src/hb.c
     src/relay.c
     src/raft_node.c

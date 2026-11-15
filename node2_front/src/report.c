@@ -13,6 +13,7 @@
 #include "node_config.h"
 #include "relay.h"
 #include "raft_node.h"
+#include "gtime.h"
 #include "jitter.h"
 #include "wcet.h"
 
@@ -105,11 +106,12 @@ static void report_thread(void *p1, void *p2, void *p3)
 		printk(" | dup %ld echo %ld rxdrop %ld", (long)atomic_clear(&s->duplicates),
 		       (long)atomic_clear(&s->own_echo), (long)atomic_clear(&s->rx_dropped));
 		if (RELAY_ENABLED) {
-			printk(" | relay %ld skip %ld drop %ld raftlate %ld",
+			printk(" | relay %ld skip %ld drop %ld raftlate %ld raftlost %ld",
 			       (long)atomic_clear(&relay_stats.forwarded),
 			       (long)atomic_clear(&relay_stats.skipped),
 			       (long)atomic_clear(&relay_stats.dropped),
-			       (long)atomic_clear(&relay_stats.raft_late));
+			       (long)atomic_clear(&relay_stats.raft_late),
+			       (long)atomic_clear(&relay_stats.raft_lost));
 		}
 		printk("\n");
 
@@ -148,6 +150,7 @@ static void report_thread(void *p1, void *p2, void *p3)
 		print_counts(s->accepted, s->gaps);
 		printk("\n");
 		raft_node_print_status();
+		gtime_report();
 
 		struct ctrl_cmd cmd;
 		uint32_t age;

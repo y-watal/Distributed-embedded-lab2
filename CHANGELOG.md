@@ -6,6 +6,38 @@ bus showed afterwards. Wire formats and rules are in
 [docs/lab5_protocol.md](docs/lab5_protocol.md); the plan is in
 [roadmap.md](roadmap.md).
 
+## 2026-11-14 (uncommitted, not yet flashed)
+
+### Relayed Raft fragments retry for a TX buffer
+- **Changed:** N2's relay sends a bulk Raft fragment with
+  `canbus_forward_try()` in 250 µs slices for up to 2 ms
+  (`RELAY_RAFT_TX_WAIT_US`), and forwards waiting CTRL and FAULT frames
+  between tries. A fragment it still cannot send is counted as `raftlost` on
+  the relay report line. The relay queue grows from 16 to 32 entries.
+- **Why:** in the 17:48 hop capture, N2 failed to relay 13–42 frames/s on bus
+  B (3–13 on A) because relayed frames used `K_NO_WAIT`. N3 never received the
+  6-fragment APPEND for entry 20, so its log stayed at commit 19 for 28 s.
+
+### Client waits for its own commit before re-reporting a link
+- **Changed:** `CLIENT_REPLY COMMITTED idx=N` records N for that subject. A
+  node's own link that its graph disagrees with is not reported again until N
+  is applied locally, or until `RAFT_CLIENT_REPAIR_HOLD_MS` (1 s) passes.
+- **Why:** N3 re-sent `CANLINK_DOWN N3 A` about 10 times a second while it
+  waited for entry 20, which added load to the relay.
+- **Tests:** `test_committed_reply_holds_graph_repair` in `raft_agent_test.c`.
+
+### Clock synchronization (Part 6)
+- **Added:** `shared/timesync.c` (offset slewing, the drift ratio, holdover),
+  STM32 `gtime.c`, and Pi `gtime.c`. REF is stamped per bus with global time,
+  N2 restamps relayed REF, and a PPS thread prints one `SYNC:` line per global
+  second. Details are in docs/lab5_protocol.md, "Time synchronization from
+  REF".
+- **Tests:** `tests/timesync_test.c` uses a +60 ppm follower with ±30 µs
+  receive jitter. The model stays within 27 µs and measures −63 ppm. A
+  300 µs handover is slewed 50 µs per REF.
+- **Pending:** pins for PPS, SYNC, LEADER and REF_RX, blinkers driven from
+  global time, and calibrating `TIMESYNC_REF_DELAY_US` against the scope.
+
 ## 2026-11-12
 
 ### `4d2fa9f` Heartbeat may wait 0.5 ms for a TX buffer

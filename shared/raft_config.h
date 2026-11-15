@@ -25,6 +25,7 @@
 #define RAFT_REPORT_UP_HOLD_MS         100  /* recovery must stay stable this long */
 #define RAFT_CLIENT_RETRY_MS           100  /* resend an unanswered CLIENT_UPDATE */
 #define RAFT_CLIENT_REJECT_BACKOFF_MS  1000 /* after the leader answers REJECTED */
+#define RAFT_CLIENT_REPAIR_HOLD_MS     1000 /* after COMMITTED, before re-reporting a graph disagreement */
 
 _Static_assert(RAFT_CLUSTER_SIZE == 3, "Lab 5 requires three nodes");
 _Static_assert(RAFT_DEFAULT_LEADER >= -1 && RAFT_DEFAULT_LEADER < RAFT_CLUSTER_SIZE,

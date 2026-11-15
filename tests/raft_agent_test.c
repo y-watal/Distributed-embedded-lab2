@@ -233,6 +233,50 @@ static void test_recovery_cancels_stale_loss_and_repairs_graph(void)
 	assert(client.active_request && client.active_event.type == RAFT_EVENT_CANLINK_UP);
 }
 
+/* A COMMITTED reply for an entry this node has not applied yet must not make
+ * the client re-report its own link every poll (the hop's relay flood). */
+static void test_committed_reply_holds_graph_repair(void)
+{
+	struct sink sink = {0};
+	struct raft_agent client;
+	struct raft_event down = {RAFT_EVENT_CANLINK_DOWN, NODE_N3, 0, 0};
+
+	raft_agent_init(&client, NODE_N3, sink_send, &sink, 0, 3);
+	client.network.link_known[NODE_N3][0] = true;
+	client.network.link_up[NODE_N3][0] = true; /* stale: entry 20 not applied */
+	client.applied_index = 19;
+	client.commit_index = 19;
+	raft_client_observe(&client, down, 1);
+	raft_agent_poll(&client, 1 + RAFT_REPORT_DOWN_HOLD_MS);
+	assert(client.active_request && client.active_event.type == RAFT_EVENT_CANLINK_DOWN);
+
+	struct raft_client_reply reply = {
+		.target = NODE_N3, .request_id = client.active_request_id,
+		.status = RAFT_CLIENT_COMMITTED, .leader = NODE_N1, .committed_index = 20,
+	};
+	uint8_t body[RAFT_CLIENT_REPLY_LEN];
+
+	raft_client_reply_encode(&reply, body);
+	raft_agent_receive(&client, ID_CLIENT_REPLY(NODE_N1), body, sizeof(body), 100);
+	assert(!client.active_request);
+
+	unsigned before = sink.updates;
+	for (uint32_t t = 105; t < 100 + RAFT_CLIENT_REPAIR_HOLD_MS; t += 5) {
+		raft_agent_poll(&client, t);
+	}
+	assert(sink.updates == before && !client.active_request);
+
+	/* Still not applied after the hold: report once more. */
+	raft_agent_poll(&client, 100 + RAFT_CLIENT_REPAIR_HOLD_MS);
+	assert(client.active_request && sink.updates == before + 1);
+
+	/* Applied but a later entry disagrees again: report without waiting. */
+	client.active_request = false;
+	client.applied_index = client.commit_index = 21;
+	raft_agent_poll(&client, 101 + RAFT_CLIENT_REPAIR_HOLD_MS);
+	assert(client.active_request);
+}
+
 static void pump(struct simulation *s, uint32_t now)
 {
 	for (unsigned rounds = 0; rounds < 100 && s->count; rounds++) {
@@ -367,6 +411,7 @@ int main(void)
 	test_debounce_and_coalesce();
 	test_stale_peer_loss_is_rejected();
 	test_recovery_cancels_stale_loss_and_repairs_graph();
+	test_committed_reply_holds_graph_repair();
 	test_returning_follower_catches_up();
 	test_isolated_follower_does_not_raise_term();
 

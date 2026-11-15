@@ -12,6 +12,7 @@
 #include "tp.h"
 #include "jitter.h"
 #include "wcet.h"
+#include "gtime.h"
 
 #define DISPATCH_STACK_SIZE 1536
 #define RX_QUEUE_DEPTH      32
@@ -341,6 +342,10 @@ int canbus_send_raft(uint32_t id, const uint8_t payload[FRAME_DLC])
 		if (is_raft_bulk(id) && !canbus_raft_wait_reserve(bus)) {
 			atomic_inc(&canbus_stats.bus[bus].raft_late);
 		}
+		if ((id & ~3u) == ID_REF(0)) {
+			/* Global time as late as possible: per bus, just before the MCP2515. */
+			gtime_stamp_ref(frame.data);
+		}
 		tp_toggle(tp_tx[bus]);
 		int ret = send_counted(bus, &frame, K_MSEC(2));
 		if (ret == 0) {
@@ -417,6 +422,32 @@ int canbus_forward_at(int bus, const struct can_frame *frame, uint32_t release)
 		return -ENETUNREACH;
 	}
 	return queue_on(bus, frame, release, true, K_NO_WAIT);
+}
+
+int canbus_forward_try(int bus, const struct can_frame *frame, uint32_t release,
+		       k_timeout_t wait)
+{
+	if (!bus_running[bus]) {
+		return -ENETDOWN;
+	}
+	if (atomic_get(&bus_degraded[bus])) {
+		atomic_inc(&canbus_stats.bus[bus].tx_skipped);
+		return -ENETUNREACH;
+	}
+	tp_toggle(tp_tx[bus]);
+	int ret = send_counted(bus, frame, wait);
+
+	if (ret == 0) {
+		jit_note(frame->id, bus, release, true);
+	} else if (ret != -EAGAIN) {
+		atomic_inc(&canbus_stats.bus[bus].tx_err);
+	}
+	return ret; /* -EAGAIN is not counted: the caller retries */
+}
+
+void canbus_note_tx_full(int bus)
+{
+	atomic_inc(&canbus_stats.bus[bus].tx_full);
 }
 
 void canbus_flush(int bus)

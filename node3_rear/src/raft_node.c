@@ -9,6 +9,8 @@
 #include "raft_transport.h"
 #include "raft_route.h"
 #include "raft_status.h"
+#include "gtime.h"
+#include "tp.h"
 
 #define RAFT_STACK_SIZE 3072
 #define RAFT_QUEUE_DEPTH 32
@@ -27,6 +29,8 @@ static struct k_thread raft_thread_data;
 static struct raft_agent agent;
 static struct raft_transport transport;
 static atomic_t route_snapshot;
+/* bits 0-7: leader + 1 (0 = unknown); bit 8: this node leads */
+static atomic_t leader_snapshot;
 
 static bool emit_frame(void *ctx, uint32_t id, const uint8_t frame[FRAME_DLC])
 {
@@ -64,7 +68,12 @@ static void raft_thread(void *p1, void *p2, void *p3)
 		}
 		raft_agent_poll(&agent, now);
 		atomic_set(&route_snapshot, (atomic_val_t)raft_route_snapshot(&agent.network));
+		atomic_set(&leader_snapshot, (atomic_val_t)((agent.leader + 1) |
+			(agent.role == RAFT_LEADER ? 0x100 : 0)));
+		bool leads = agent.role == RAFT_LEADER;
 		k_mutex_unlock(&raft_lock);
+		tp_set(TP_LEADER, leads);
+		tp_set(TP_SYNC, gtime_is_synced());
 	}
 }
 
@@ -80,6 +89,8 @@ int raft_node_init(void)
 		       agent.term, agent.leader + 1,
 		       agent.role == RAFT_LEADER ? "leader" : "follower");
 	}
+	atomic_set(&leader_snapshot, (atomic_val_t)((agent.leader + 1) |
+		(agent.role == RAFT_LEADER ? 0x100 : 0)));
 	k_thread_create(&raft_thread_data, raft_stack, K_THREAD_STACK_SIZEOF(raft_stack),
 			raft_thread, NULL, NULL, NULL, PRIO_RAFT, 0, K_NO_WAIT);
 	k_thread_name_set(&raft_thread_data, "raft");
@@ -112,6 +123,14 @@ void raft_node_get_network(struct raft_network *out)
 uint32_t raft_node_route_snapshot(void)
 {
 	return (uint32_t)atomic_get(&route_snapshot);
+}
+
+void raft_node_leader_snapshot(int *leader, bool *is_leader)
+{
+	atomic_val_t v = atomic_get(&leader_snapshot);
+
+	*leader = (int)(v & 0xFF) - 1;
+	*is_leader = (v & 0x100) != 0;
 }
 
 void raft_node_print_status(void)

@@ -65,6 +65,15 @@ int canbus_send_raft(uint32_t id, const uint8_t payload[FRAME_DLC]);
 int canbus_forward(int bus, const struct can_frame *frame);
 int canbus_forward_at(int bus, const struct can_frame *frame, uint32_t release);
 
+/*
+ * One relay attempt that may wait up to `wait` for a TX buffer. -EAGAIN (all
+ * buffers busy) is returned without counting tx_full so the relay can retry;
+ * if it finally gives up it calls canbus_note_tx_full().
+ */
+int canbus_forward_try(int bus, const struct can_frame *frame, uint32_t release,
+		       k_timeout_t wait);
+void canbus_note_tx_full(int bus);
+
 /* In a relay hook / handler: k_cycle_get_32() when rx_cb got this frame. */
 uint32_t canbus_rx_cycles(void);
 

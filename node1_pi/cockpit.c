@@ -148,10 +148,11 @@ static atomic_int force_last;
 static atomic_uint tx_ok[NUM_BUSES], tx_err[NUM_BUSES], tx_skip[NUM_BUSES], err_frames[NUM_BUSES];
 static atomic_uint rx_count[NUM_BUSES][NUM_SLOTS];
 static atomic_bool busoff[NUM_BUSES];
-static atomic_ullong lat_sum_ns, lat_max_ns, lat_all_max_ns;
+// Lab 5: response-time stats (max/mean) commented out.
+// static atomic_ullong lat_sum_ns, lat_max_ns, lat_all_max_ns;
 static atomic_ullong udp_gap_max_ns, udp_gap_all_max_ns; /* longest wait between wheel packets */
 static atomic_uint udp_gaps_over; /* gaps longer than UDP_TIMEOUT_NS */
-static atomic_uint lat_n;
+// static atomic_uint lat_n;
 
 /*
  * Queuing jitter J per message and bus: the triggering event -> write() of
@@ -167,32 +168,34 @@ static atomic_uint lat_n;
  * Lock-free: the CTRL path only adds a clock read and a few atomics.
  */
 enum { J_CTRL, J_FAULT_N1, J_HB_N1, J_BLINK_TOGGLE, J_BLINK_CHANGE, J_NUM };
-static const char *const j_names[J_NUM] = {
-	"CTRL        ", "FAULT_N1    ", "HB_N1       ", "BLINK toggle", "BLINK change"};
-static atomic_ullong j_max[J_NUM][NUM_BUSES], j_max_win[J_NUM][NUM_BUSES], j_sum[J_NUM][NUM_BUSES];
-static atomic_uint j_n[J_NUM][NUM_BUSES];
-#define J_REPORT_EVERY 5 /* seconds; "last" in the table is this window */
+// Lab 5: response-time stats (max/mean) commented out.
+// static const char *const j_names[J_NUM] = {
+// 	"CTRL        ", "FAULT_N1    ", "HB_N1       ", "BLINK toggle", "BLINK change"};
+// static atomic_ullong j_max[J_NUM][NUM_BUSES], j_max_win[J_NUM][NUM_BUSES], j_sum[J_NUM][NUM_BUSES];
+// static atomic_uint j_n[J_NUM][NUM_BUSES];
+// #define J_REPORT_EVERY 5 /* seconds; "last" in the table is this window */
 
-static void atomic_max(atomic_ullong *a, unsigned long long v)
-{
-	unsigned long long prev = atomic_load(a);
-
-	while (v > prev && !atomic_compare_exchange_weak(a, &prev, v)) {
-	}
-}
-
-static void j_note(int msg, int bus, uint64_t release_ns, uint64_t queued_ns)
-{
-	if (msg < 0 || release_ns == 0 || queued_ns < release_ns) {
-		return;
-	}
-	uint64_t j = queued_ns - release_ns;
-
-	atomic_max(&j_max[msg][bus], j);
-	atomic_max(&j_max_win[msg][bus], j);
-	atomic_fetch_add(&j_sum[msg][bus], j);
-	atomic_fetch_add(&j_n[msg][bus], 1);
-}
+// Lab 5: response-time stats (max/mean) commented out.
+// static void atomic_max(atomic_ullong *a, unsigned long long v)
+// {
+// 	unsigned long long prev = atomic_load(a);
+//
+// 	while (v > prev && !atomic_compare_exchange_weak(a, &prev, v)) {
+// 	}
+// }
+//
+// static void j_note(int msg, int bus, uint64_t release_ns, uint64_t queued_ns)
+// {
+// 	if (msg < 0 || release_ns == 0 || queued_ns < release_ns) {
+// 		return;
+// 	}
+// 	uint64_t j = queued_ns - release_ns;
+//
+// 	atomic_max(&j_max[msg][bus], j);
+// 	atomic_max(&j_max_win[msg][bus], j);
+// 	atomic_fetch_add(&j_sum[msg][bus], j);
+// 	atomic_fetch_add(&j_n[msg][bus], 1);
+// }
 
 static uint8_t tx_seq[NUM_SLOTS];
 
@@ -267,9 +270,12 @@ static bool send_on_j(int bus, uint32_t id, const uint8_t data[FRAME_DLC], bool 
 		atomic_fetch_add(&tx_err[bus], 1); /* queue full (no ACK) or interface down */
 		return false;
 	}
-	if (jmsg >= 0) {
-		j_note(jmsg, bus, release_ns, now_ns());
-	}
+	// Lab 5: response-time stats (max/mean) commented out.
+// 	if (jmsg >= 0) {
+// 		j_note(jmsg, bus, release_ns, now_ns());
+// 	}
+	(void)jmsg;
+	(void)release_ns;
 	atomic_fetch_add(&tx_ok[bus], 1);
 	return true;
 }
@@ -471,19 +477,20 @@ static void flush_bus(int bus)
 /* UDP_RX: the brake path                                                */
 /* ===================================================================== */
 
-static void record_latency(uint64_t ns)
-{
-	unsigned long long prev;
-
-	atomic_fetch_add(&lat_sum_ns, ns);
-	atomic_fetch_add(&lat_n, 1);
-	prev = atomic_load(&lat_max_ns);
-	while (ns > prev && !atomic_compare_exchange_weak(&lat_max_ns, &prev, ns)) {
-	}
-	prev = atomic_load(&lat_all_max_ns);
-	while (ns > prev && !atomic_compare_exchange_weak(&lat_all_max_ns, &prev, ns)) {
-	}
-}
+// Lab 5: response-time stats (max/mean) commented out.
+// static void record_latency(uint64_t ns)
+// {
+// 	unsigned long long prev;
+//
+// 	atomic_fetch_add(&lat_sum_ns, ns);
+// 	atomic_fetch_add(&lat_n, 1);
+// 	prev = atomic_load(&lat_max_ns);
+// 	while (ns > prev && !atomic_compare_exchange_weak(&lat_max_ns, &prev, ns)) {
+// 	}
+// 	prev = atomic_load(&lat_all_max_ns);
+// 	while (ns > prev && !atomic_compare_exchange_weak(&lat_all_max_ns, &prev, ns)) {
+// 	}
+// }
 
 /* Lab 2 blinkers.c and the self-test button, after the CTRL is out. lock held. */
 static void wheel_logic(int32_t steer, bool b4, bool b5, bool b10, uint64_t now)
@@ -585,7 +592,7 @@ static void udp_loop(void)
 		send_on_j(BUS_A, ID_CTRL, data, false, J_CTRL, t0);
 		tp_toggle(TP_CMD_TX);
 		send_on_j(BUS_B, ID_CTRL, data, false, J_CTRL, t0);
-		record_latency(now_ns() - t0);
+// 		record_latency(now_ns() - t0); /* Lab 5: response-time stats commented out */
 		atomic_fetch_add(&ctrl_sent, 1);
 		atomic_fetch_add(&udp_count, 1);
 
@@ -1016,7 +1023,7 @@ static void *timer_thread(void *arg)
 static void *report_thread(void *arg)
 {
 	uint64_t start = t0_ns, next = now_ns() + 1000 * MS;
-	unsigned reports = 0;
+// 	unsigned reports = 0; /* Lab 5: only counted J reports, commented out */
 
 	(void)arg;
 	while (!atomic_load(&stop)) {
@@ -1024,9 +1031,10 @@ static void *report_thread(void *arg)
 		next += 1000 * MS;
 
 		uint64_t now = now_ns();
-		unsigned n = atomic_exchange(&lat_n, 0);
-		unsigned long long sum = atomic_exchange(&lat_sum_ns, 0);
-		unsigned long long mx = atomic_exchange(&lat_max_ns, 0);
+		// Lab 5: response-time stats (max/mean) commented out.
+// 		unsigned n = atomic_exchange(&lat_n, 0);
+// 		unsigned long long sum = atomic_exchange(&lat_sum_ns, 0);
+// 		unsigned long long mx = atomic_exchange(&lat_max_ns, 0);
 
 		pthread_mutex_lock(&lock);
 		enum zone_state z = zone;
@@ -1066,10 +1074,11 @@ static void *report_thread(void *arg)
 			printf("  wheel: no packets yet (is the proxy sending to UDP port %d?) | blink %s\n",
 			       opt.udp_port, blink_names[bm]);
 		}
-		if (n) {
-			printf("  UDP -> CAN write latency: mean %llu us, max %llu us (all-time max %llu us)\n",
-			       sum / n / 1000, mx / 1000, atomic_load(&lat_all_max_ns) / 1000);
-		}
+		// Lab 5: response-time stats (max/mean) commented out.
+// 		if (n) {
+// 			printf("  UDP -> CAN write latency: mean %llu us, max %llu us (all-time max %llu us)\n",
+// 			       sum / n / 1000, mx / 1000, atomic_load(&lat_all_max_ns) / 1000);
+// 		}
 		for (int bus = 0; bus < NUM_BUSES; bus++) {
 			const char *st = if_state(bus);
 
@@ -1098,32 +1107,33 @@ static void *report_thread(void *arg)
 		       atomic_exchange(&force_fwd, 0));
 		raft_node_print_status();
 		gtime_report();
-		if (++reports % J_REPORT_EVERY == 0) {
-			printf("  J, trigger -> write() returned, us: max since start / max last %d s / mean (frames)\n",
-			       J_REPORT_EVERY);
-			for (int m = 0; m < J_NUM; m++) {
-				bool any = false;
-
-				for (int bus = 0; bus < NUM_BUSES; bus++) {
-					unsigned k = atomic_load(&j_n[m][bus]);
-					unsigned long long win = atomic_exchange(&j_max_win[m][bus], 0);
-
-					if (k == 0) {
-						continue;
-					}
-					if (!any) {
-						printf("    %s", j_names[m]);
-						any = true;
-					}
-					printf("  %c %.1f / %.1f / %.1f (%u)", 'A' + bus,
-					       atomic_load(&j_max[m][bus]) / 1e3, win / 1e3,
-					       atomic_load(&j_sum[m][bus]) / 1e3 / k, k);
-				}
-				if (any) {
-					printf("\n");
-				}
-			}
-		}
+		// Lab 5: response-time stats (max/mean) commented out.
+// 		if (++reports % J_REPORT_EVERY == 0) {
+// 			printf("  J, trigger -> write() returned, us: max since start / max last %d s / mean (frames)\n",
+// 			       J_REPORT_EVERY);
+// 			for (int m = 0; m < J_NUM; m++) {
+// 				bool any = false;
+//
+// 				for (int bus = 0; bus < NUM_BUSES; bus++) {
+// 					unsigned k = atomic_load(&j_n[m][bus]);
+// 					unsigned long long win = atomic_exchange(&j_max_win[m][bus], 0);
+//
+// 					if (k == 0) {
+// 						continue;
+// 					}
+// 					if (!any) {
+// 						printf("    %s", j_names[m]);
+// 						any = true;
+// 					}
+// 					printf("  %c %.1f / %.1f / %.1f (%u)", 'A' + bus,
+// 					       atomic_load(&j_max[m][bus]) / 1e3, win / 1e3,
+// 					       atomic_load(&j_sum[m][bus]) / 1e3 / k, k);
+// 				}
+// 				if (any) {
+// 					printf("\n");
+// 				}
+// 			}
+// 		}
 		fflush(stdout);
 	}
 	return NULL;

@@ -51,6 +51,16 @@ bus showed afterwards. Wire formats and rules are in
 - **Pending:** blinkers driven from global time, and calibrating
   `TIMESYNC_REF_DELAY_US` against the scope.
 
+### Response-time statistics commented out
+- **STM32s:** `WCET_MEASURE` and `JITTER_MEASURE` are 0 in `lab3_config.h`
+  (the old `1` lines are left commented), so every probe compiles away. The
+  WCET and J tables in `report.c` are commented out.
+- **Pi:** the UDP->CAN latency line (mean/max) and the J table (max/mean),
+  with their recording, are commented out in `cockpit.c`. The `J_*` tags
+  stay, because `send_on_j()` calls still pass them.
+- To restore them, uncomment those lines and set the two STM32 switches
+  back to 1.
+
 ### Blinkers and hazards from global time; Zephyr system time
 - **Blinkers:** N2 and N3 time FL/FR/RL/RR from `global_gettime()` through
   `shared/blink_phase.h`: on for the first half of each period, aligned to

@@ -130,14 +130,18 @@
  * Needs CONFIG_THREAD_RUNTIME_STATS / CONFIG_SCHED_THREAD_USAGE in prj.conf.
  * 0 compiles every probe away.
  */
-#define WCET_MEASURE      1
+// Lab 5: response-time stats (max/mean) commented out.
+// #define WCET_MEASURE      1
+#define WCET_MEASURE      0 /* every probe compiles away */
 #define WCET_REPORT_EVERY 5 /* print the WCET table with every 5th summary */
 
 /*
  * Queuing jitter J per message (src/jitter.c): trigger -> frame queued in the
  * MCP2515, wall clock, per bus. 0 compiles the recording away.
  */
-#define JITTER_MEASURE      1
+// Lab 5: response-time stats (max/mean) commented out.
+// #define JITTER_MEASURE      1
+#define JITTER_MEASURE      0 /* recording compiles away */
 #define JITTER_REPORT_EVERY 5 /* print with every 5th summary; "last" = that window */
 
 #endif /* LAB3_CONFIG_H */

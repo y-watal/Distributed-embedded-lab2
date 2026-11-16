@@ -66,7 +66,7 @@ static void report_thread(void *p1, void *p2, void *p3)
 {
 	int64_t next = k_uptime_get() + REPORT_PERIOD_MS;
 	struct wcet_job job = WCET_JOB(WCET_REPORT);
-	unsigned int reports = 0;
+// 	unsigned int reports = 0; /* Lab 5: only paced the stats tables, commented out */
 
 	ARG_UNUSED(p1);
 	ARG_UNUSED(p2);
@@ -165,13 +165,14 @@ static void report_thread(void *p1, void *p2, void *p3)
 		printk("\n");
 		printk("  blink: %s\n", blink_describe());
 		app_report();
-		++reports;
-		if (WCET_MEASURE && reports % WCET_REPORT_EVERY == 0) {
-			wcet_report();
-		}
-		if (JITTER_MEASURE && reports % JITTER_REPORT_EVERY == 0) {
-			jit_report();
-		}
+// 		++reports;
+		// Lab 5: response-time stats (max/mean) commented out.
+// 		if (WCET_MEASURE && reports % WCET_REPORT_EVERY == 0) {
+// 			wcet_report();
+// 		}
+// 		if (JITTER_MEASURE && reports % JITTER_REPORT_EVERY == 0) {
+// 			jit_report();
+// 		}
 	}
 }
 

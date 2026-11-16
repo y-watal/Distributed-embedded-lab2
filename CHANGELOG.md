@@ -69,8 +69,9 @@ bus showed afterwards. Wire formats and rules are in
 - **Tests:** `tests/blink_phase_test.c`. On the Pi, BLINK and UDP-timeout
   checks fail now and then on this code and on the committed code (1 run in
   6), when the test's simulated wheel stalls for more than 90 ms.
-- **Unverified:** the STM32 build (the POSIX clock header and Kconfig name are
-  written for Zephyr 4.x), and FL/RL alignment on the scope.
+- **Unverified:** the STM32 build, and FL/RL alignment on the scope.
+  `clock_settime()` comes from the standard `<time.h>` (Zephyr 4.4.99 moved
+  it off `<zephyr/posix/time.h>`), with `CONFIG_POSIX_TIMERS=y`.
 
 ## 2026-11-12
 

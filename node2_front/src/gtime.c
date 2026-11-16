@@ -1,7 +1,7 @@
 #include "gtime.h"
 
 #include <zephyr/kernel.h>
-#include <zephyr/posix/time.h> /* clock_settime(), CONFIG_POSIX_TIMERS */
+#include <time.h> /* clock_settime(), CONFIG_POSIX_TIMERS; Zephyr 4.4.99 standard path */
 #include <zephyr/sys/printk.h>
 
 #include "catalog.h"

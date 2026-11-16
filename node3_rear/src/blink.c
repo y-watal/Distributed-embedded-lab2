@@ -5,6 +5,7 @@
 
 #include "catalog.h"
 #include "blink_phase.h"
+#include "canbus.h" /* BUS_A, BUS_B */
 #include "evlog.h"
 #include "gtime.h"
 #include "hb.h"
@@ -70,18 +71,25 @@ static void blink_thread(void *p1, void *p2, void *p3)
 
 		uint32_t now = k_uptime_get_32();
 		uint32_t rx = (uint32_t)atomic_get(&last_rx_ms);
-		/* Cockpit down: the vehicle's failure mode, hazards at 4 Hz. */
-		bool failure = !hb_peer_alive(NODE_N1);
-		bool hazard_here = zone_state() == ZONE_ISOLATED || failure ||
-				   rx == 0 || now - rx > BLINK_STALE_MS;
+		/*
+		 * Cut off from both buses (jumpers pulled): we can't tell whether the
+		 * cockpit is down, so this is an ordinary local hazard at 2 Hz. Only
+		 * N1 going silent while we still hear the bus is the vehicle's
+		 * failure mode (cockpit down), at 4 Hz.
+		 */
+		bool isolated = zone_state() == ZONE_ISOLATED ||
+				(hb_bus_degraded(BUS_A) && hb_bus_degraded(BUS_B));
+		bool failure = !isolated && !hb_peer_alive(NODE_N1);
+		bool hazard_here = isolated || failure || rx == 0 || now - rx > BLINK_STALE_MS;
 		uint32_t half_ms;
 		bool left, right;
 
 		if (hazard_here) {
 			half_ms = failure ? BLINK_FAILURE_HALF_MS : BLINK_HAZARD_HALF_MS;
 			if ((uint32_t)atomic_get(&local_hazard) != half_ms) {
-				if (zone_state() == ZONE_ISOLATED) {
-					evlog("local hazard ON (%u Hz): zone ISOLATED", 500u / half_ms);
+				if (isolated) {
+					evlog("local hazard ON (%u Hz): isolated from both buses",
+					      500u / half_ms);
 				} else if (failure) {
 					evlog("local hazard ON (%u Hz): N1 heartbeat lost, failure mode",
 					      500u / half_ms);

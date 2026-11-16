@@ -51,6 +51,15 @@ bus showed afterwards. Wire formats and rules are in
 - **Pending:** blinkers driven from global time, and calibrating
   `TIMESYNC_REF_DELAY_US` against the scope.
 
+### Isolated node flashes 2 Hz, not failure-mode 4 Hz
+- **Seen:** with both of N2's jumpers pulled, N2 flashed 4 Hz while N3 flashed
+  the cockpit's 2 Hz hazards. N2 had lost N1's heartbeat only because N2
+  itself was cut off, and `blink.c` treated any N1 loss as the cockpit down.
+- **Changed:** failure mode (4 Hz) now requires N1 silent while this node
+  still hears a bus. A zone that is ISOLATED, or has both buses degraded,
+  flashes 2 Hz hazards. Its phase stays on global time (holdover), so it
+  should stay in step with the other zone.
+
 ### Rest of the lab: rejoin, replay, snapshots, random leader, events, debug
 - **Pi back (checkoff 7):** the default leader listens 250 ms before taking
   term 1, and joins a running cluster as a follower instead. Each node prints

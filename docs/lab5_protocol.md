@@ -148,8 +148,8 @@ Pi in `node1_pi/gtime.c`. All times are microseconds.
   | Mode | Rate | Decided by |
   |---|---|---|
   | Left / right turn signal | 1 Hz (Lab 3 R2.4) | cockpit `BLINK` |
-  | Hazards, cockpit up | 2 Hz | cockpit `BLINK` HAZARD; zone ISOLATED or `BLINK` stale (2.6 s) |
-  | Hazards, failure mode | 4 Hz | N1's heartbeat lost: the cockpit is down |
+  | Hazards, cockpit up | 2 Hz | cockpit `BLINK` HAZARD; this node isolated (ISOLATED or both buses degraded); `BLINK` stale (2.6 s) |
+  | Hazards, failure mode | 4 Hz | N1's heartbeat lost while this node still hears the bus: the cockpit is down |
 
 The PPS, SYNC, LEADER and REF_RX pins are PC10, PC11, PC12 and PD2 on both
 STM32s (morpho CN7 pins 1-4), and GPIO12, 21, 17 and 27 on the Pi (header

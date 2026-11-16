@@ -27,12 +27,12 @@
 		rl-gpios       = <&gpiob 4 GPIO_ACTIVE_HIGH>;	/* row 12: RL,       D5 / PB4, LED */
 		rr-gpios       = <&gpioc 8 GPIO_ACTIVE_HIGH>;	/* row 13: RR,       PC8 (morpho), LED */
 		err-gpios      = <&gpioc 6 GPIO_ACTIVE_HIGH>;	/* row 14: ERR,      PC6 (morpho), added */
-		/* Lab 5 (src/gtime.c). No Arduino pin is free; same morpho pins on N2 and N3,
-		 * the 2x2 block at the top of CN7 (pins 1-4). */
-		pps-gpios      = <&gpioc 10 GPIO_ACTIVE_HIGH>;	/* row 15: PPS,      PC10 (CN7-1), rising edge each global second */
-		sync-gpios     = <&gpioc 11 GPIO_ACTIVE_HIGH>;	/* row 16: SYNC,     PC11 (CN7-2), LED */
-		leader-gpios   = <&gpioc 12 GPIO_ACTIVE_HIGH>;	/* row 17: LEADER,   PC12 (CN7-3), LED */
-		ref-rx-gpios   = <&gpiod 2 GPIO_ACTIVE_HIGH>;	/* row 18: REF_RX,   PD2  (CN7-4), toggles per REF used */
+		/* Lab 5 (src/gtime.c). No Arduino pin is free, so N2 and N3 use the same
+		 * morpho pins, labelled on the board: CN7 pins 1-4 (top of the left header). */
+		pps-gpios      = <&gpioc 10 GPIO_ACTIVE_HIGH>;	/* PPS:    PC10, morpho CN7 pin 1 (rising edge each global second) */
+		sync-gpios     = <&gpioc 11 GPIO_ACTIVE_HIGH>;	/* SYNC:   PC11, morpho CN7 pin 2 (LED) */
+		leader-gpios   = <&gpioc 12 GPIO_ACTIVE_HIGH>;	/* LEADER: PC12, morpho CN7 pin 3 (LED) */
+		ref-rx-gpios   = <&gpiod 2 GPIO_ACTIVE_HIGH>;	/* REF_RX: PD2,  morpho CN7 pin 4 (toggles per REF used) */
 
 		/* L298 H-bridge (src/motor.c), Lab 2 pins */
 		hbridge-gpios = <&gpiob 12 GPIO_ACTIVE_HIGH>,	/* IN1, also DIR_A */

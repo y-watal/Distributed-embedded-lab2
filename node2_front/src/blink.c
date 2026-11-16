@@ -4,7 +4,9 @@
 #include <zephyr/sys/atomic.h>
 
 #include "catalog.h"
+#include "blink_phase.h"
 #include "evlog.h"
+#include "gtime.h"
 #include "hb.h"
 #include "lab3_config.h"
 #include "node_config.h"
@@ -13,10 +15,12 @@
 #include "zone.h"
 
 #define BLINK_STACK_SIZE 1024
+#define BLINK_POLL_US    10000 /* re-check zone, peers and BLINK age at least this often */
 
 static atomic_t last_bits;      /* byte 1 of the last BLINK */
 static atomic_t last_rx_ms;     /* 0 = never */
-static atomic_t local_hazard;
+static atomic_t local_hazard;   /* half period of a local hazard, 0 = none */
+static atomic_t lamp_half_ms;   /* half period now in use, 0 = lamps off */
 static atomic_t lamps;          /* bit 0 left, bit 1 right: what's lit now */
 
 K_SEM_DEFINE(blink_new, 0, 1);
@@ -39,11 +43,19 @@ static void set_lamps(bool left, bool right)
 	atomic_set(&lamps, (left ? 1 : 0) | (right ? 2 : 0));
 }
 
+/* Half period for a cockpit BLINK mode; 0 = off. */
+static uint32_t mode_half_ms(uint8_t mode)
+{
+	if (mode == (BLINK_LEFT | BLINK_RIGHT)) {
+		return BLINK_HAZARD_HALF_MS;
+	}
+	return mode ? BLINK_TURN_HALF_MS : 0;
+}
+
 static void blink_thread(void *p1, void *p2, void *p3)
 {
-	uint32_t next_local_toggle = 0;
-	bool local_phase = false;
 	uint8_t logged_mode = 0;
+	uint32_t wait_us = 0;
 	struct wcet_job job = WCET_JOB(WCET_BLINK);
 
 	ARG_UNUSED(p1);
@@ -51,67 +63,83 @@ static void blink_thread(void *p1, void *p2, void *p3)
 	ARG_UNUSED(p3);
 
 	for (;;) {
-		/* A frame wakes us at once; otherwise re-check every 10 ms. */
+		/* A frame wakes us at once; otherwise the next lamp edge, or 10 ms. */
 		wcet_end(&job);
-		k_sem_take(&blink_new, K_MSEC(10));
+		k_sem_take(&blink_new, K_USEC(wait_us));
 		wcet_begin(&job);
 
 		uint32_t now = k_uptime_get_32();
 		uint32_t rx = (uint32_t)atomic_get(&last_rx_ms);
-		bool hazard_here = zone_state() == ZONE_ISOLATED || !hb_peer_alive(NODE_N1) ||
+		/* Cockpit down: the vehicle's failure mode, hazards at 4 Hz. */
+		bool failure = !hb_peer_alive(NODE_N1);
+		bool hazard_here = zone_state() == ZONE_ISOLATED || failure ||
 				   rx == 0 || now - rx > BLINK_STALE_MS;
+		uint32_t half_ms;
+		bool left, right;
 
 		if (hazard_here) {
-			if (!atomic_get(&local_hazard)) {
+			half_ms = failure ? BLINK_FAILURE_HALF_MS : BLINK_HAZARD_HALF_MS;
+			if ((uint32_t)atomic_get(&local_hazard) != half_ms) {
 				if (zone_state() == ZONE_ISOLATED) {
-					evlog("local hazard ON: zone ISOLATED");
-				} else if (!hb_peer_alive(NODE_N1)) {
-					evlog("local hazard ON: N1 heartbeat lost");
+					evlog("local hazard ON (%u Hz): zone ISOLATED", 500u / half_ms);
+				} else if (failure) {
+					evlog("local hazard ON (%u Hz): N1 heartbeat lost, failure mode",
+					      500u / half_ms);
 				} else if (rx == 0) {
-					evlog("local hazard ON: no BLINK received yet");
+					evlog("local hazard ON (%u Hz): no BLINK received yet",
+					      500u / half_ms);
 				} else {
-					evlog("local hazard ON: no BLINK for %u ms", now - rx);
+					evlog("local hazard ON (%u Hz): no BLINK for %u ms",
+					      500u / half_ms, now - rx);
 				}
-				atomic_set(&local_hazard, 1);
-				local_phase = true;
-				next_local_toggle = now + BLINK_HALF_MS;
-			} else if ((int32_t)(now - next_local_toggle) >= 0) {
-				local_phase = !local_phase;
-				next_local_toggle += BLINK_HALF_MS;
+				atomic_set(&local_hazard, (atomic_val_t)half_ms);
 			}
-			set_lamps(local_phase, local_phase);
-			continue;
+			left = right = true;
+		} else {
+			if (atomic_get(&local_hazard)) {
+				evlog("local hazard off");
+			}
+			atomic_set(&local_hazard, 0);
+
+			uint8_t mode = (uint8_t)atomic_get(&last_bits) & (BLINK_LEFT | BLINK_RIGHT);
+
+			if (mode != logged_mode) {
+				static const char *const names[] = {"off", "LEFT", "RIGHT", "HAZARD"};
+
+				evlog("cockpit BLINK %s -> %s", names[logged_mode], names[mode]);
+				logged_mode = mode;
+			}
+			half_ms = mode_half_ms(mode);
+			left = mode & BLINK_LEFT;
+			right = mode & BLINK_RIGHT;
 		}
-		if (atomic_get(&local_hazard)) {
-			evlog("local hazard off");
-		}
-		atomic_set(&local_hazard, 0);
+		atomic_set(&lamp_half_ms, (atomic_val_t)half_ms);
 
-		uint8_t bits = (uint8_t)atomic_get(&last_bits);
-		uint8_t mode = bits & (BLINK_LEFT | BLINK_RIGHT);
+		/* Phase from global time, not from the BLINK frame: front and rear
+		 * switch at the same global instant (shared/blink_phase.h). */
+		uint64_t g = global_gettime();
+		bool on = blink_phase_on(g, half_ms);
 
-		if (mode != logged_mode) {
-			static const char *const names[] = {"off", "LEFT", "RIGHT", "HAZARD"};
+		set_lamps(on && left, on && right);
 
-			evlog("cockpit BLINK %s -> %s", names[logged_mode], names[mode]);
-			logged_mode = mode;
-		}
-		bool on = bits & BLINK_PHASE;
+		uint64_t to_edge = half_ms ? blink_us_to_edge(g, half_ms) : BLINK_POLL_US;
 
-		set_lamps(on && (bits & BLINK_LEFT), on && (bits & BLINK_RIGHT));
+		wait_us = (uint32_t)(to_edge < BLINK_POLL_US ? to_edge : BLINK_POLL_US);
 	}
 }
 
 const char *blink_describe(void)
 {
 	static const char *const names[] = {"off", "LEFT", "RIGHT", "HAZARD"};
-	static char buf[32];
+	static char buf[40];
 	uint8_t bits = (uint8_t)atomic_get(&last_bits) & (BLINK_LEFT | BLINK_RIGHT);
-	bool local = atomic_get(&local_hazard);
+	bool local = atomic_get(&local_hazard) != 0;
+	uint32_t half = (uint32_t)atomic_get(&lamp_half_ms);
 	int l = (int)atomic_get(&lamps);
 
-	snprintk(buf, sizeof(buf), "%s%s, lamps %s", local ? "HAZARD" : names[bits],
-		 local ? " (local)" : "", l == 3 ? "both on" : (l == 1 ? "L on" : (l == 2 ? "R on" : "off")));
+	snprintk(buf, sizeof(buf), "%s%s %uHz, lamps %s", local ? "HAZARD" : names[bits],
+		 local ? " (local)" : "", half ? 500u / half : 0u,
+		 l == 3 ? "both on" : (l == 1 ? "L on" : (l == 2 ? "R on" : "off")));
 	return buf;
 }
 

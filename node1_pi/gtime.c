@@ -178,12 +178,13 @@ void gtime_report(void)
 			snprintf(master, sizeof(master), "?");
 		}
 		printf("  SYNC: global=%llu.%06llu local=%llu.%06llu master=%s synced=%d"
-		       " drift=%s%u.%03uppm%s err=%dus corr=%dus driftcorr=%dus"
+		       " ratio=%.9f drift=%s%u.%03uppm%s err=%dus corr=%dus driftcorr=%dus"
 		       " refs=%u stale=%u steps=%u\n",
 		       (unsigned long long)(s.global_us / 1000000u),
 		       (unsigned long long)(s.global_us % 1000000u),
 		       (unsigned long long)(s.local_us / 1000000u),
 		       (unsigned long long)(s.local_us % 1000000u), master, s.synced,
+		       1.0 + s.drift_ppb / 1e9,
 		       s.drift_ppb < 0 ? "-" : "+", mag / 1000u, mag % 1000u,
 		       s.drift_valid ? "" : "(none)", s.last_error_us, s.last_correction_us,
 		       s.drift_since_ref_us, s.refs - prev_refs, s.stale - prev_stale, s.steps);

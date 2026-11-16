@@ -26,10 +26,10 @@ enum {
 	TP_DEG_B    = 16,  /* row 8, header pin 36, LED */
 	TP_ERR      = 20,  /* row 9, header pin 38 (added row) */
 	/* Lab 5 (gtime.c, raft_node.c) */
-	TP_PPS      = 12,  /* row 10, header pin 32: rising edge each global second */
-	TP_SYNC     = 21,  /* row 11, header pin 40, LED: leader or synced follower */
-	TP_LEADER   = 17,  /* row 12, header pin 11, LED: N1 is the Raft leader */
-	TP_REF_RX   = 27,  /* row 13, header pin 13: toggles per REF used (follower) */
+	TP_PPS      = 12,  /* header pin 32: rising edge each global second */
+	TP_SYNC     = 21,  /* header pin 40, LED: leader or synced follower */
+	TP_LEADER   = 17,  /* header pin 11, LED: N1 is the Raft leader */
+	TP_REF_RX   = 27,  /* header pin 13: toggles per REF used (follower) */
 };
 
 static const int tp_all[] = {TP_UDP_RX, TP_CMD_TX, TP_CAN_TX_A, TP_CAN_TX_B,

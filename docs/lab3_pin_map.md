@@ -34,18 +34,20 @@ three nodes.
 | 13 | - | | ERR | D3 / PB3 | RR (LED) | PC8 (morpho) |
 | 14 | | | | | ERR *(added)* | PC6 (morpho) |
 
-### Lab 5 rows
+### Lab 5 pins
 
-No Arduino header pin is free on either Nucleo, so both STM32s use the same
-four morpho pins: the 2x2 block at the top of CN7 (pins 1-4, beside the
-labels PC10, PC11, PC12, PD2). LED rows use the same ~330 ohm resistor to GND.
+These are named as printed on the boards. Breadboard rows aren't used. No
+Arduino header pin is free on either Nucleo, so both STM32s use the same
+four morpho pins: the first four pins of CN7, the left long header, labelled
+PC10, PC11, PC12 and PD2 on the silkscreen. LED pins drive an LED through
+~330 ohm to GND.
 
-| Signal | N1 Pi: GPIO (header pin), row | N2 front: pin, row | N3 rear: pin, row |
-|---|---|---|---|
-| PPS | GPIO12 (32), row 10 | PC10 (CN7-1), row 14 | PC10 (CN7-1), row 15 |
-| SYNC (LED) | GPIO21 (40), row 11 | PC11 (CN7-2), row 15 | PC11 (CN7-2), row 16 |
-| LEADER (LED) | GPIO17 (11), row 12 | PC12 (CN7-3), row 16 | PC12 (CN7-3), row 17 |
-| REF_RX | GPIO27 (13), row 13 | PD2 (CN7-4), row 17 | PD2 (CN7-4), row 18 |
+| Signal | N1 Pi: BCM GPIO (header pin) | N2 and N3 Nucleo: pin (connector) |
+|---|---|---|
+| PPS | GPIO12 (pin 32) | PC10 (CN7 pin 1) |
+| SYNC (LED) | GPIO21 (pin 40) | PC11 (CN7 pin 2) |
+| LEADER (LED) | GPIO17 (pin 11) | PC12 (CN7 pin 3) |
+| REF_RX | GPIO27 (pin 13) | PD2 (CN7 pin 4) |
 
 "Morpho" pins are on the two long ST morpho headers; their names are printed
 next to the header on the Nucleo. The test button is the on-board blue USER

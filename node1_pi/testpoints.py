@@ -10,7 +10,7 @@ Run this file directly to walk every point high in turn:  ./testpoints.py
 """
 import time
 
-# name: (BCM GPIO, header pin, breadboard row)
+# name: (BCM GPIO, header pin, breadboard row or None)
 TEST_POINTS = {
     "UDP_RX":   (5,  29, 3),   # reception of a UDP update
     "CMD_TX":   (6,  31, 4),   # transmission of the command (the CAN write)
@@ -19,11 +19,11 @@ TEST_POINTS = {
     "DEG_A":    (26, 37, 7),   # LED: bus A degraded at this node
     "DEG_B":    (16, 36, 8),   # LED: bus B degraded at this node
     "ERR":      (20, 38, 9),   # high while the cockpit zone is in the error state (added row)
-    # Lab 5
-    "PPS":      (12, 32, 10),  # rising edge at each whole second of global time
-    "SYNC":     (21, 40, 11),  # LED: leader, or follower synced to the leader's REF
-    "LEADER":   (17, 11, 12),  # LED: N1 is the Raft leader
-    "REF_RX":   (27, 13, 13),  # toggles on each REF used for time sync
+    # Lab 5: no breadboard row, wired straight from the header pin
+    "PPS":      (12, 32, None),  # rising edge at each whole second of global time
+    "SYNC":     (21, 40, None),  # LED: leader, or follower synced to the leader's REF
+    "LEADER":   (17, 11, None),  # LED: N1 is the Raft leader
+    "REF_RX":   (27, 13, None),  # toggles on each REF used for time sync
 }
 
 
@@ -69,7 +69,8 @@ def walk(ms_per_point=300):
     tp = TestPoints()
     try:
         for name, (gpio, pin, row) in TEST_POINTS.items():
-            print(f"row {row:2d}  {name:9s} GPIO{gpio:<2d} (header pin {pin})")
+            where = f"row {row:2d}" if row else "      "
+            print(f"{where}  {name:9s} GPIO{gpio:<2d} (header pin {pin})")
             tp.set(name, 1)
             time.sleep(ms_per_point / 1000)
             tp.set(name, 0)

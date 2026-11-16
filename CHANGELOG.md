@@ -44,11 +44,33 @@ bus showed afterwards. Wire formats and rules are in
   second on bus B, so N3 got only 44-48 CTRL a second.
 
 ### Lab 5 test-point pins
-- PPS, SYNC, LEADER and REF_RX on PC10, PC11, PC12 and PD2 (CN7 pins 1-4) on
-  both STM32s, since no Arduino pin is free. On the Pi they are GPIO12, 21,
-  17 and 27. The rows are in docs/lab3_pin_map.md.
+- PPS, SYNC, LEADER and REF_RX on PC10, PC11, PC12 and PD2 (morpho CN7 pins
+  1-4) on both STM32s, since no Arduino pin is free. On the Pi they are
+  GPIO12, 21, 17 and 27 (header pins 32, 40, 11 and 13). See
+  docs/lab3_pin_map.md, "Lab 5 pins".
 - **Pending:** blinkers driven from global time, and calibrating
   `TIMESYNC_REF_DELAY_US` against the scope.
+
+### Blinkers and hazards from global time; Zephyr system time
+- **Blinkers:** N2 and N3 time FL/FR/RL/RR from `global_gettime()` through
+  `shared/blink_phase.h`: on for the first half of each period, aligned to
+  whole global seconds. Each lamp edge is a timed wake-up, no longer a 10 ms
+  poll or a reaction to a BLINK frame. Front and rear therefore differ only by
+  the sync error and wake-up latency, not by BLINK delivery.
+- **Rates:** turn signals 1 Hz, hazards 2 Hz, failure-mode hazards (N1 lost)
+  4 Hz. These were 1 Hz everywhere before.
+- **Cockpit:** sends BLINK on each global-time lamp edge and on mode changes,
+  and at least every 500 ms. A mode change no longer restarts the phase, so
+  the first toggle after a change can come sooner than 500 ms. A new Pi test
+  checks that hazard toggles are 250 ms apart.
+- **System time:** follower STM32s call `clock_settime(CLOCK_REALTIME)` after
+  each REF they use (`CONFIG_POSIX_TIMERS=y`). The SYNC line adds `sys=` and
+  `ratio=`.
+- **Tests:** `tests/blink_phase_test.c`. On the Pi, BLINK and UDP-timeout
+  checks fail now and then on this code and on the committed code (1 run in
+  6), when the test's simulated wheel stalls for more than 90 ms.
+- **Unverified:** the STM32 build (the POSIX clock header and Kconfig name are
+  written for Zephyr 4.x), and FL/RL alignment on the scope.
 
 ## 2026-11-12
 

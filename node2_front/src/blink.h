@@ -2,11 +2,13 @@
  * BLINK_F (N2) / BLINK_R (N3): this zone's two blinker lamps (BLINK_LAMP_LEFT /
  * BLINK_LAMP_RIGHT in node_config.h).
  *
- * Follows the cockpit's BLINK frames: lamp on = its side's bit set and the
- * phase bit set, updated as soon as a frame arrives (both STM32s act on the
- * same frame, which is the front/rear sync). If N1's heartbeat is lost, the
- * zone is ISOLATED, or no BLINK arrives for BLINK_STALE_MS (2.6 s), the zone
- * flashes its own hazards at 1 Hz. A single lost BLINK only delays one edge.
+ * The cockpit's BLINK frames choose the mode (off, left, right, hazard). The
+ * lamp phase comes from global_gettime() (shared/blink_phase.h), so front and
+ * rear switch at the same global instant: turn signals 1 Hz, hazards 2 Hz.
+ * If N1's heartbeat is lost (cockpit down: failure mode) the zone flashes
+ * hazards at 4 Hz. If the zone is ISOLATED or no BLINK arrives for
+ * BLINK_STALE_MS (2.6 s), it flashes hazards at 2 Hz. Phases stay
+ * global-time aligned in every case.
  */
 #ifndef BLINK_H
 #define BLINK_H

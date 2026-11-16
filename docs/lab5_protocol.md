@@ -133,10 +133,27 @@ Pi in `node1_pi/gtime.c`. All times are microseconds.
   `REF` moved the clock. `driftcorr` is the rate correction applied since the
   last `REF`. `refs` and `stale` are per-second counts.
 
+- **System time.** After each `REF` it uses, a follower STM32 also sets
+  Zephyr's `CLOCK_REALTIME` with `clock_settime()` (`CONFIG_POSIX_TIMERS`), as
+  handout 6.1 asks. `CLOCK_REALTIME` has kernel-tick resolution;
+  `global_gettime()` stays the precise source. The `SYNC:` line prints both
+  (`sys=`), plus the drift ratio `(L2 − L1) / (F2 − F1)` itself (`ratio=`).
+- **Blinkers.** A lamp is lit during the first half of each period of global
+  time, with periods aligned to whole global seconds (`shared/blink_phase.h`).
+  FL, RL and PPS therefore switch at the same global instant. `BLINK` frames
+  only choose the mode; N2 and N3 ignore the phase bit, and the cockpit sets it
+  from the same function. The rates are:
+
+  | Mode | Rate | Decided by |
+  |---|---|---|
+  | Left / right turn signal | 1 Hz (Lab 3 R2.4) | cockpit `BLINK` |
+  | Hazards, cockpit up | 2 Hz | cockpit `BLINK` HAZARD; zone ISOLATED or `BLINK` stale (2.6 s) |
+  | Hazards, failure mode | 4 Hz | N1's heartbeat lost: the cockpit is down |
+
 The PPS, SYNC, LEADER and REF_RX pins are PC10, PC11, PC12 and PD2 on both
-STM32s, and GPIO12, 21, 17 and 27 on the Pi. Rows are in
-docs/lab3_pin_map.md, "Lab 5 rows". On the Pi, only `cockpit.c` maps
-`/dev/gpiomem`, so `gtime.c` and `raft_node.c` drive pins through
+STM32s (morpho CN7 pins 1-4), and GPIO12, 21, 17 and 27 on the Pi (header
+pins 32, 40, 11 and 13). See docs/lab3_pin_map.md, "Lab 5 pins". On the
+Pi, only `cockpit.c` maps `/dev/gpiomem`, so `gtime.c` and `raft_node.c` drive pins through
 `pi_tp_set()` and `pi_tp_toggle()`.
 
 ## Other messages: fragmentation

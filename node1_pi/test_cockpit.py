@@ -145,6 +145,10 @@ def main():
         bl = sim.since(t, 0x200, "A")
         check("power-up: BLINK is hazard", bl and (bl[-1][3][1] & 3) == 3, f"last BLINK byte1 0x{bl[-1][3][1]:02x}" if bl else "none")
         check("no CTRL without wheel data", not sim.since(t, 0x010))
+        hz = [f for f in bl if (f[3][1] & 3) == 3]
+        hz_gaps = [round(b[0] - a[0], 3) for a, b in zip(hz, hz[1:])]
+        check("Lab 5: hazards toggle every 250 ms (2 Hz)",
+              len(hz_gaps) >= 1 and all(0.22 <= g <= 0.28 for g in hz_gaps[1:] or hz_gaps), str(hz_gaps))
 
         # 2. Proxy starts: CTRL on every packet, state NORMAL.
         sim.wheel = (1000, 16384, 0, [])
@@ -171,7 +175,9 @@ def main():
         gaps = [round(b[0] - a[0], 3) for a, b in zip(left, left[1:])]
         check("button 5 -> BLINK LEFT, phase alternating", len(left) >= 3 and all(p != q for p, q in zip(phases, phases[1:])),
               f"phases {phases}")
-        check("BLINK toggles every 500 ms", gaps and all(0.47 <= g <= 0.53 for g in gaps), str(gaps))
+        # Lab 5: toggles fall on global 500 ms edges, so only the first gap
+        # (mode change -> first edge) may be shorter.
+        check("BLINK toggles every 500 ms", gaps and gaps[0] <= 0.53 and all(0.47 <= g <= 0.53 for g in gaps[1:]), str(gaps))
 
         # 4. Steering past +-5000 then back cancels the left signal.
         sim.wheel = (-8000, 16384, 0, []); sim.run(0.2)

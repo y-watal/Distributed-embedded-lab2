@@ -1,6 +1,7 @@
 #include "gtime.h"
 
 #include <zephyr/kernel.h>
+#include <zephyr/posix/time.h> /* clock_settime(), CONFIG_POSIX_TIMERS */
 #include <zephyr/sys/printk.h>
 
 #include "catalog.h"
@@ -25,6 +26,7 @@ static uint64_t cyc_high;
 struct pps_snapshot {
 	uint64_t global_us;
 	uint64_t local_us;
+	uint64_t system_us; /* CLOCK_REALTIME at the edge */
 	int32_t drift_ppb;
 	int32_t last_error_us;
 	int32_t last_correction_us;
@@ -73,6 +75,33 @@ uint64_t global_gettime(void)
 	return g;
 }
 
+/*
+ * Handout 6.1, "Updating Zephyr on Followers": set the system clock from the
+ * adjusted leader time after each REF. CLOCK_REALTIME then reads global time
+ * at kernel-tick resolution; global_gettime() stays the precise source (it
+ * applies the drift ratio and microsecond timestamps).
+ */
+static void update_system_time(void)
+{
+	uint64_t g = global_gettime();
+	struct timespec ts = {
+		.tv_sec = (time_t)(g / 1000000u),
+		.tv_nsec = (long)(g % 1000000u) * 1000L,
+	};
+
+	(void)clock_settime(CLOCK_REALTIME, &ts);
+}
+
+static uint64_t system_time_us(void)
+{
+	struct timespec ts;
+
+	if (clock_gettime(CLOCK_REALTIME, &ts) != 0) {
+		return 0;
+	}
+	return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
+}
+
 void gtime_on_ref(const struct can_frame *frame, uint32_t rx_cycles)
 {
 	int sender = catalog_sender(frame->id);
@@ -98,6 +127,7 @@ void gtime_on_ref(const struct can_frame *frame, uint32_t rx_cycles)
 	k_spin_unlock(&lock, key);
 	if (used) {
 		tp_toggle(TP_REF_RX);
+		update_system_time();
 	}
 }
 
@@ -181,6 +211,7 @@ static void pps_thread(void *p1, void *p2, void *p3)
 			.stale = ts.stale,
 		};
 		k_spin_unlock(&lock, key);
+		s.system_us = system_time_us();
 		(void)k_msgq_put(&pps_q, &s, K_NO_WAIT); /* report drains it */
 
 		k_msleep(PPS_PULSE_MS);
@@ -202,6 +233,7 @@ void gtime_report(void)
 		printk("  SYNC:");
 		print_us("global", s.global_us);
 		print_us("local", s.local_us);
+		print_us("sys", s.system_us);
 		if (s.leader) {
 			printk(" master=self");
 		} else if (s.master >= 0) {
@@ -213,9 +245,12 @@ void gtime_report(void)
 		int32_t ppb = s.drift_ppb;
 		uint32_t mag = (uint32_t)(ppb < 0 ? -ppb : ppb);
 
-		printk(" synced=%d drift=%s%u.%03uppm%s err=%dus corr=%dus driftcorr=%dus"
+		/* ratio = 1 + ppb / 1e9, printed to 9 decimals */
+		uint32_t frac = (uint32_t)(ppb < 0 ? 1000000000 + ppb : ppb);
+
+		printk(" synced=%d ratio=%u.%09u drift=%s%u.%03uppm%s err=%dus corr=%dus driftcorr=%dus"
 		       " refs=%u stale=%u steps=%u\n",
-		       s.synced, ppb < 0 ? "-" : "+", mag / 1000u, mag % 1000u,
+		       s.synced, ppb < 0 ? 0u : 1u, frac, ppb < 0 ? "-" : "+", mag / 1000u, mag % 1000u,
 		       s.drift_valid ? "" : "(none)", s.last_error_us, s.last_correction_us,
 		       s.drift_since_ref_us, s.refs - prev_refs, s.stale - prev_stale, s.steps);
 		prev_refs = s.refs;

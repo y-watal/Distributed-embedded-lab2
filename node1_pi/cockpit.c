@@ -5,7 +5,7 @@
  *                                      immediately (R4.4); blinker and test
  *                                      button logic after the writes
  *   timer     every 20 ms HB_N1; every 5 ms HB_MON (DEG_A/B, peers, zone
- *             state, ERR, UDP timeout), BLINK (master, 500 ms phase), FAULT_N1
+ *             state, ERR, UDP timeout), BLINK (mode; phase from global time), FAULT_N1
  *   can_rx    both buses: heartbeats, FAULT_N2/N3, FORCE -> UDP to the proxy
  *   report    console summary once a second
  *   stdin     typed commands (fault injection, test button)
@@ -46,6 +46,7 @@
 #include <unistd.h>
 
 #include "catalog_pi.h"
+#include "blink_phase.h"
 #include "gtime.h"
 #include "raft_node.h"
 #include "raft_config.h"
@@ -62,7 +63,7 @@
 #define MONITOR_PERIOD_NS   (5 * MS)
 #define DUP_WINDOW_NS       (10 * MS)
 #define UDP_TIMEOUT_NS      (90 * MS)  /* Lab 2's command freshness limit */
-#define BLINK_HALF_NS       (500 * MS) /* 1 Hz blink (R2.4); catalog: toggle every 500 ms */
+#define BLINK_REFRESH_NS    (500 * MS) /* BLINK sent at least this often, even when off */
 #define MIN_EVENT_GAP_NS    (20 * MS)  /* catalog: BLINK and FAULT at least 20 ms apart */
 #define FAULT_CLEAR_HOLD_NS (HB_MAX_INTERVAL_NS + 3 * MS)
 
@@ -920,7 +921,7 @@ static void *timer_thread(void *arg)
 {
 	uint64_t now = now_ns();
 	uint64_t next_hb = now, next_mon = now;
-	uint64_t last_fault_ns = 0, last_blink_ns = 0, next_toggle = now;
+	uint64_t last_fault_ns = 0, last_blink_ns = 0;
 	enum blink_mode sent_mode = BLINK_OFF;
 	bool phase = false;
 
@@ -952,24 +953,34 @@ static void *timer_thread(void *arg)
 			printf("[N1 %.3fs] >> %s\n", (double)(now - t0_ns) / 1e9, event);
 		}
 
-		/* BLINK master: on change (phase on), then a toggle every 500 ms. */
+		/*
+		 * BLINK: the mode on change, then one frame per lamp edge. The phase
+		 * bit is the global-time phase (shared/blink_phase.h) that N2 and N3
+		 * light their lamps from: turn signals 1 Hz, hazards 2 Hz.
+		 */
 		bool send = false;
 		int blink_j = -1;
 		uint64_t blink_rel = 0;
+		uint32_t half_ms = mode == BLINK_HAZARD ? BLINK_HAZARD_HALF_MS :
+				   (mode == BLINK_OFF ? 0 : BLINK_TURN_HALF_MS);
+		uint64_t g = global_gettime();
+		bool want = blink_phase_on(g, half_ms);
+		bool gap_ok = now - last_blink_ns >= MIN_EVENT_GAP_NS;
 
-		if (mode != sent_mode && now - last_blink_ns >= MIN_EVENT_GAP_NS) {
+		if (mode != sent_mode && gap_ok) {
 			blink_j = J_BLINK_CHANGE;
 			blink_rel = mode_t;
 			sent_mode = mode;
-			phase = mode != BLINK_OFF;
-			next_toggle = now + BLINK_HALF_NS;
+			phase = want;
 			send = true;
-		} else if (now >= next_toggle) {
+		} else if (mode == sent_mode && phase != want && gap_ok) {
 			blink_j = J_BLINK_TOGGLE;
-			blink_rel = next_toggle;
-			phase = sent_mode != BLINK_OFF && !phase;
-			next_toggle += BLINK_HALF_NS;
-			send = true; /* also refreshes "off" every 500 ms */
+			/* release = the global edge, in local time */
+			blink_rel = now - (g % (half_ms * 1000ull)) * 1000ull;
+			phase = want;
+			send = true;
+		} else if (now - last_blink_ns >= BLINK_REFRESH_NS) {
+			send = true; /* refreshes "off" (and the mode) every 500 ms */
 		}
 		if (send) {
 			uint8_t d[FRAME_DLC] = {0};

@@ -56,7 +56,7 @@
 #define FAULT_MIN_GAP_MS     20   /* catalog: FAULT min interval */
 
 /* Blinkers */
-#define BLINK_HALF_MS  500  /* local hazard rate when the cockpit can't be heard (1 Hz) */
+/* Blink rates and phase: shared/blink_phase.h (Lab 5, from global time). */
 /*
  * No BLINK for this long while N1's heartbeat is still heard: flash hazards
  * locally. Losing the cockpit is detected by the heartbeat (66 ms); this is
@@ -64,7 +64,7 @@
  * so it tolerates 5 lost toggles. At 1100 ms (2 lost), a couple of frames
  * dropped on a single-path relay (one bus unplugged) put up false hazards.
  */
-#define BLINK_STALE_MS (5 * BLINK_HALF_MS + 100)
+#define BLINK_STALE_MS (5 * 500 + 100) /* the cockpit refreshes BLINK at least every 500 ms */
 
 /* FORCE_TX (N2): dummy counter every 50 ms */
 #define FORCE_PERIOD_MS 50

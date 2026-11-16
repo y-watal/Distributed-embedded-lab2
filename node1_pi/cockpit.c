@@ -195,6 +195,16 @@ static void j_note(int msg, int bus, uint64_t release_ns, uint64_t queued_ns)
 
 static uint8_t tx_seq[NUM_SLOTS];
 
+void pi_tp_set(int gpio, int level)
+{
+	tp_set(gpio, level);
+}
+
+void pi_tp_toggle(int gpio)
+{
+	tp_toggle(gpio);
+}
+
 static uint64_t now_ns(void)
 {
 	struct timespec ts;

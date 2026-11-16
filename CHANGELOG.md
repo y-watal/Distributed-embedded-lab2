@@ -35,8 +35,20 @@ bus showed afterwards. Wire formats and rules are in
 - **Tests:** `tests/timesync_test.c` uses a +60 ppm follower with ±30 µs
   receive jitter. The model stays within 27 µs and measures −63 ppm. A
   300 µs handover is slewed 50 µs per REF.
-- **Pending:** pins for PPS, SYNC, LEADER and REF_RX, blinkers driven from
-  global time, and calibrating `TIMESYNC_REF_DELAY_US` against the scope.
+- **Hop capture 20:42-20:47 (N1 off B, then N3 off A, both restored):** N2
+  and N3 committed entries 13-16, one per link change, within the same 1 s
+  report, with matching log hashes. `raftlost` stayed at 0, and both nodes
+  stayed synced the whole time, N3 through the relay as well. REF error had a
+  median of 12-14 us and a 95th percentile of about 95 us. Drift was +51 ppm
+  on N2 and +60 ppm on N3. N2 still lost 5-16 relayed non-Raft frames a
+  second on bus B, so N3 got only 44-48 CTRL a second.
+
+### Lab 5 test-point pins
+- PPS, SYNC, LEADER and REF_RX on PC10, PC11, PC12 and PD2 (CN7 pins 1-4) on
+  both STM32s, since no Arduino pin is free. On the Pi they are GPIO12, 21,
+  17 and 27. The rows are in docs/lab3_pin_map.md.
+- **Pending:** blinkers driven from global time, and calibrating
+  `TIMESYNC_REF_DELAY_US` against the scope.
 
 ## 2026-11-12
 

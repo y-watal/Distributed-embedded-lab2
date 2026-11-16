@@ -19,6 +19,11 @@ TEST_POINTS = {
     "DEG_A":    (26, 37, 7),   # LED: bus A degraded at this node
     "DEG_B":    (16, 36, 8),   # LED: bus B degraded at this node
     "ERR":      (20, 38, 9),   # high while the cockpit zone is in the error state (added row)
+    # Lab 5
+    "PPS":      (12, 32, 10),  # rising edge at each whole second of global time
+    "SYNC":     (21, 40, 11),  # LED: leader, or follower synced to the leader's REF
+    "LEADER":   (17, 11, 12),  # LED: N1 is the Raft leader
+    "REF_RX":   (27, 13, 13),  # toggles on each REF used for time sync
 }
 
 

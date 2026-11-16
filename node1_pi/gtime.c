@@ -10,9 +10,7 @@
 #include "testpoints.h"
 #include "timesync.h"
 
-#ifndef PPS_GPIO
-#define PPS_GPIO -1 /* no Pi pin assigned yet */
-#endif
+#define PPS_GPIO TP_PPS
 #define PPS_PULSE_US  100000
 #define PPS_SPIN_US   300
 #define PPS_QUEUE_LEN 4
@@ -59,8 +57,11 @@ void gtime_on_ref(uint32_t id, const uint8_t data[FRAME_DLC], uint64_t rx_ns)
 	}
 	raft_ref_decode(data, &ref);
 	pthread_mutex_lock(&lock);
-	timesync_on_ref(&ts, sender, &ref, rx_ns / 1000u);
+	bool used = timesync_on_ref(&ts, sender, &ref, rx_ns / 1000u);
 	pthread_mutex_unlock(&lock);
+	if (used) {
+		pi_tp_toggle(TP_REF_RX);
+	}
 }
 
 void gtime_stamp_ref(uint8_t data[FRAME_DLC])
@@ -109,7 +110,7 @@ static void *pps_thread(void *arg)
 			continue; /* clock stepped: no stale pulse */
 		}
 		if (PPS_GPIO >= 0) {
-			tp_set(PPS_GPIO, 1);
+			pi_tp_set(PPS_GPIO, 1);
 		}
 
 		int leader;
@@ -143,7 +144,7 @@ static void *pps_thread(void *arg)
 
 		sleep_us(PPS_PULSE_US);
 		if (PPS_GPIO >= 0) {
-			tp_set(PPS_GPIO, 0);
+			pi_tp_set(PPS_GPIO, 0);
 		}
 	}
 	return NULL;

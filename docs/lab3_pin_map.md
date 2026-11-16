@@ -34,6 +34,19 @@ three nodes.
 | 13 | - | | ERR | D3 / PB3 | RR (LED) | PC8 (morpho) |
 | 14 | | | | | ERR *(added)* | PC6 (morpho) |
 
+### Lab 5 rows
+
+No Arduino header pin is free on either Nucleo, so both STM32s use the same
+four morpho pins: the 2x2 block at the top of CN7 (pins 1-4, beside the
+labels PC10, PC11, PC12, PD2). LED rows use the same ~330 ohm resistor to GND.
+
+| Signal | N1 Pi: GPIO (header pin), row | N2 front: pin, row | N3 rear: pin, row |
+|---|---|---|---|
+| PPS | GPIO12 (32), row 10 | PC10 (CN7-1), row 14 | PC10 (CN7-1), row 15 |
+| SYNC (LED) | GPIO21 (40), row 11 | PC11 (CN7-2), row 15 | PC11 (CN7-2), row 16 |
+| LEADER (LED) | GPIO17 (11), row 12 | PC12 (CN7-3), row 16 | PC12 (CN7-3), row 17 |
+| REF_RX | GPIO27 (13), row 13 | PD2 (CN7-4), row 17 | PD2 (CN7-4), row 18 |
+
 "Morpho" pins are on the two long ST morpho headers; their names are printed
 next to the header on the Nucleo. The test button is the on-board blue USER
 button B1 (PC13) on both Nucleos.
@@ -53,6 +66,10 @@ button B1 (PC13) on both Nucleos.
 | PWM_SET | Toggles every time the motor is set: a duty (throttle; 0 = coast) or the brake, whether or not the output changed. DRIVE sets it once per CTRL it acts on and once when it drops to OFF, so with the PID compiled out that is one edge per CTRL that reaches the motor |
 | DIR_A | H-bridge IN1: low for forward drive and for brake (Lab 2 wiring) |
 | FL, FR, RL, RR | The blinker LED outputs |
+| PPS | Rising edge at every whole second of `global_gettime()`, high for 100 ms. Scope all three: the spread is the sync error |
+| SYNC | On while the node leads, or has used a leader `REF` in the last 1 s |
+| LEADER | On while the node is the Raft leader (and so the time master) |
+| REF_RX | Toggles on each `REF` used for time sync (not on the duplicate copy from the other bus) |
 
 In code: `src/tp.h` (`tp_toggle(TP_CAN_TX_A)`, `tp_set(TP_ERR, 1)`) with pins
 in each node's `app.overlay`; SRV is toggled in `servo.c`; PWM_OUT and DIR_A
@@ -102,6 +119,7 @@ the module side; on the XIAO footprint D9 is MISO and D10 is MOSI.
 | PB6, PC7 / PA10, PB5 | CAN A / B chip select / interrupt | same |
 | PA13, PA14 | SWD (ST-LINK) | SWD |
 | PC13 | USER button B1 | USER button B1 |
+| PC10, PC11, PC12, PD2 (CN7 1-4) | Lab 5 PPS, SYNC, LEADER, REF_RX | same |
 | Free on the Arduino headers | none | none |
 
 Every pin above is claimed by exactly one peripheral or test point; this was

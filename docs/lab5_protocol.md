@@ -133,10 +133,11 @@ Pi in `node1_pi/gtime.c`. All times are microseconds.
   `REF` moved the clock. `driftcorr` is the rate correction applied since the
   last `REF`. `refs` and `stale` are per-second counts.
 
-`TP_PPS`, `TP_SYNC`, `TP_LEADER` and `TP_REF_RX` are defined in `tp.h`.
-They do nothing until `app.overlay` assigns them pins (`pps-gpios`,
-`sync-gpios`, `leader-gpios`, `ref-rx-gpios`). On the Pi, PPS waits for a
-`PPS_GPIO` BCM number.
+The PPS, SYNC, LEADER and REF_RX pins are PC10, PC11, PC12 and PD2 on both
+STM32s, and GPIO12, 21, 17 and 27 on the Pi. Rows are in
+docs/lab3_pin_map.md, "Lab 5 rows". On the Pi, only `cockpit.c` maps
+`/dev/gpiomem`, so `gtime.c` and `raft_node.c` drive pins through
+`pi_tp_set()` and `pi_tp_toggle()`.
 
 ## Other messages: fragmentation
 

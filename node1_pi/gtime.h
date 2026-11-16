@@ -6,8 +6,8 @@
  * stamps each REF just before write(). As a follower (after an STM32 took
  * over) it tracks that leader's REF like any other node. A PPS thread wakes
  * at every whole second of global_gettime() and records a snapshot that the
- * report prints as one "SYNC:" line. PPS_GPIO (BCM number, -1 = none) drives
- * a PPS test point once a pin is assigned.
+ * report prints as one "SYNC:" line and drives TP_PPS (GPIO12, header pin 32)
+ * high for 100 ms.
  */
 #ifndef PI_GTIME_H
 #define PI_GTIME_H

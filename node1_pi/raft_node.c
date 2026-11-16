@@ -10,6 +10,8 @@
 #include "raft_transport.h"
 #include "raft_route.h"
 #include "raft_status.h"
+#include "gtime.h"
+#include "testpoints.h"
 
 #define RAFT_QUEUE_DEPTH 64
 
@@ -110,7 +112,10 @@ static void *raft_worker(void *arg)
 			memory_order_relaxed);
 		atomic_store_explicit(&leader_snapshot, (unsigned)((agent.leader + 1) |
 			(agent.role == RAFT_LEADER ? 0x100 : 0)), memory_order_relaxed);
+		bool leads = agent.role == RAFT_LEADER;
 		pthread_mutex_unlock(&lock);
+		pi_tp_set(TP_LEADER, leads);
+		pi_tp_set(TP_SYNC, gtime_is_synced());
 	}
 	return NULL;
 }

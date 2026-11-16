@@ -25,6 +25,12 @@
 		fr-gpios       = <&gpioa 8 GPIO_ACTIVE_HIGH>;	/* row 11: FR,       D7 / PA8,  LED */
 		relay-tx-gpios = <&gpioa 9 GPIO_ACTIVE_HIGH>;	/* row 12: RELAY_TX, D8 / PA9 */
 		err-gpios      = <&gpiob 3 GPIO_ACTIVE_HIGH>;	/* row 13: ERR,      D3 / PB3 */
+		/* Lab 5 (src/gtime.c). No Arduino pin is free; same morpho pins on N2 and N3,
+		 * the 2x2 block at the top of CN7 (pins 1-4). */
+		pps-gpios      = <&gpioc 10 GPIO_ACTIVE_HIGH>;	/* row 14: PPS,      PC10 (CN7-1), rising edge each global second */
+		sync-gpios     = <&gpioc 11 GPIO_ACTIVE_HIGH>;	/* row 15: SYNC,     PC11 (CN7-2), LED */
+		leader-gpios   = <&gpioc 12 GPIO_ACTIVE_HIGH>;	/* row 16: LEADER,   PC12 (CN7-3), LED */
+		ref-rx-gpios   = <&gpiod 2 GPIO_ACTIVE_HIGH>;	/* row 17: REF_RX,   PD2  (CN7-4), toggles per REF used */
 
 		/* Steering servo (src/servo.c), 50 Hz, as in Lab 2 */
 		pwms = <&pwm3 1 PWM_MSEC(20) PWM_POLARITY_NORMAL>;
@@ -36,6 +42,7 @@
 /* ---- Independent watchdog (src/watchdog.c); the window watchdog stays off ---- */
 &iwdg { status = "okay"; };
 &wwdg { status = "disabled"; };
+&gpiod { status = "okay"; };	/* PD2: REF_RX test point */
 
 &usart1 { status = "disabled"; };	/* PB6/PB7: PB6 is CAN A chip select */
 &i2c1 { status = "disabled"; };		/* PB8/PB9: DEG_A, SRV */

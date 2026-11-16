@@ -27,6 +27,12 @@
 		rl-gpios       = <&gpiob 4 GPIO_ACTIVE_HIGH>;	/* row 12: RL,       D5 / PB4, LED */
 		rr-gpios       = <&gpioc 8 GPIO_ACTIVE_HIGH>;	/* row 13: RR,       PC8 (morpho), LED */
 		err-gpios      = <&gpioc 6 GPIO_ACTIVE_HIGH>;	/* row 14: ERR,      PC6 (morpho), added */
+		/* Lab 5 (src/gtime.c). No Arduino pin is free; same morpho pins on N2 and N3,
+		 * the 2x2 block at the top of CN7 (pins 1-4). */
+		pps-gpios      = <&gpioc 10 GPIO_ACTIVE_HIGH>;	/* row 15: PPS,      PC10 (CN7-1), rising edge each global second */
+		sync-gpios     = <&gpioc 11 GPIO_ACTIVE_HIGH>;	/* row 16: SYNC,     PC11 (CN7-2), LED */
+		leader-gpios   = <&gpioc 12 GPIO_ACTIVE_HIGH>;	/* row 17: LEADER,   PC12 (CN7-3), LED */
+		ref-rx-gpios   = <&gpiod 2 GPIO_ACTIVE_HIGH>;	/* row 18: REF_RX,   PD2  (CN7-4), toggles per REF used */
 
 		/* L298 H-bridge (src/motor.c), Lab 2 pins */
 		hbridge-gpios = <&gpiob 12 GPIO_ACTIVE_HIGH>,	/* IN1, also DIR_A */
@@ -43,6 +49,7 @@
 /* ---- Independent watchdog (src/watchdog.c); the window watchdog stays off ---- */
 &iwdg { status = "okay"; };
 &wwdg { status = "disabled"; };
+&gpiod { status = "okay"; };	/* PD2: REF_RX test point */
 
 &usart1 { status = "disabled"; };	/* PB6/PB7: PB6 is CAN A chip select */
 &i2c1 { status = "disabled"; };		/* PB8/PB9: CAN_TX_A/B test points */

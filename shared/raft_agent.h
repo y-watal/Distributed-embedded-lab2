@@ -4,24 +4,9 @@
 #include "raft_config.h"
 #include "raft_wire.h"
 
-/*
- * The log is a ring of the most recent RAFT_WORKING_LOG_ENTRIES entries.
- * Log indexes are lifetime numbers; entries older than the ring are folded
- * into a snapshot (the network graph at that index plus a running hash), so
- * the log never fills. Each node compacts on its own, only entries it has
- * applied, once the ring is RAFT_COMPACT_AT full, keeping the newest
- * RAFT_COMPACT_KEEP applied entries so a briefly absent follower still gets
- * ordinary APPENDs; one further behind gets INSTALL_SNAPSHOT.
- * The STM32s use 64; a build may raise it (the Pi uses the handout's
- * log_size of 30000).
- */
-#ifndef RAFT_WORKING_LOG_ENTRIES
+/* Step 2 working log. Durable 30,000-entry storage is a later lab step. */
 #define RAFT_WORKING_LOG_ENTRIES 64
-#endif
-#define RAFT_COMPACT_AT   (RAFT_WORKING_LOG_ENTRIES * 3 / 4)
-#define RAFT_COMPACT_KEEP (RAFT_WORKING_LOG_ENTRIES / 4)
 #define RAFT_CLIENT_QUEUE_LEN 16
-_Static_assert(RAFT_WORKING_LOG_ENTRIES >= 8, "ring too small to compact");
 
 enum raft_role {
 	RAFT_FOLLOWER,
@@ -51,8 +36,6 @@ struct raft_observation {
 	bool reported;    /* a debounced value has been queued */
 	bool reported_up; /* that value */
 	uint32_t since_ms;
-	uint32_t settle_index; /* leader said COMMITTED at this index */
-	uint32_t settle_ms;    /* when that reply arrived */
 };
 
 /* Sends one complete logical body. The platform adapter fragments it for CAN. */
@@ -76,14 +59,7 @@ struct raft_agent {
 	bool ref_sent;
 	bool empty_append_sent;
 	bool election_timer_active;
-	/* Ring: lifetime index i lives in log[(i - 1) % RAFT_WORKING_LOG_ENTRIES]
-	 * for snapshot_index < i <= last_index. */
 	struct raft_log_entry log[RAFT_WORKING_LOG_ENTRIES];
-	uint32_t snapshot_index;              /* entries 1..snapshot_index compacted */
-	uint32_t snapshot_term;               /* term of entry snapshot_index */
-	struct raft_network snapshot_network; /* graph after entry snapshot_index */
-	uint32_t snapshot_hash;               /* running hash through snapshot_index */
-	uint32_t applied_hash;                /* running hash through applied_index */
 	struct raft_network network;
 	struct raft_event queued[RAFT_CLIENT_QUEUE_LEN];
 	uint8_t queue_head, queue_count;
@@ -140,18 +116,6 @@ uint32_t raft_agent_next_wake_ms(const struct raft_agent *a, uint32_t now_ms);
 
 /* Client read of the locally committed network graph. */
 void raft_client_get_network(const struct raft_agent *a, struct raft_network *out);
-
-/* Running hash of the applied (committed) log, comparable across nodes even
- * after compaction. */
-uint32_t raft_log_hash(const struct raft_agent *a);
-
-/* Copy entry index if it is still in the ring (snapshot_index < index <=
- * last_index). Returns false for compacted or future indexes. */
-bool raft_log_entry(const struct raft_agent *a, uint32_t index, struct raft_log_entry *out);
-
-/* Pack/unpack a network graph into 20 bits (INSTALL_SNAPSHOT state field). */
-uint32_t raft_network_pack(const struct raft_network *n);
-void raft_network_unpack(uint32_t bits, struct raft_network *n);
 
 /* Election entry point, also used by the missed-heartbeat timer. */
 void raft_agent_start_election(struct raft_agent *a);

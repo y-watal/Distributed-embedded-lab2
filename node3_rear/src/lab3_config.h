@@ -96,16 +96,6 @@
  */
 #define HB_TX_WAIT_US           500
 
-/*
- * N2's relay retries a frame for a TX buffer instead of dropping it. A lost
- * fragment loses a whole Raft message (a 6-fragment APPEND never reached the
- * far side of the hop), so Raft frames get the same 2 ms as N2's own Raft
- * sends; relayed Lab 3 frames get the heartbeat's 0.5 ms. CTRL and FAULT
- * waiting in the urgent queue are forwarded between retries.
- */
-#define RELAY_RAFT_WAIT_US      2000
-#define RELAY_LAB3_WAIT_US      HB_TX_WAIT_US
-
 #define RAFT_TX_MAX_INFLIGHT    2
 #define RAFT_TX_RESERVE_WAIT_US 1000
 

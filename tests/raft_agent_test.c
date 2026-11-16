@@ -97,42 +97,6 @@ static void test_commit_stops_at_matching_prefix(void)
 	       !follower.network.link_known[NODE_N3][0]);
 }
 
-/* Bench 19:19:04: a false NODE_DOWN N3 then NODE_UP N3 committed while N3
- * stayed on B. The node must come back with its last link states, not with
- * both links down (which stopped every relay toward it). */
-static void test_node_down_keeps_links(void)
-{
-	struct sink k = {0};
-	struct raft_agent f;
-	const struct raft_event events[] = {
-		{RAFT_EVENT_CANLINK_UP, NODE_N3, 1, 0},
-		{RAFT_EVENT_CANLINK_DOWN, NODE_N3, 0, 0},
-		{RAFT_EVENT_NODE_DOWN, NODE_N3, RAFT_BUS_NONE, 0},
-		{RAFT_EVENT_NODE_UP, NODE_N3, RAFT_BUS_NONE, 0},
-	};
-	uint8_t body[RAFT_APPEND_ENTRY_LEN];
-
-	raft_agent_init(&f, NODE_N2, sink_send, &k, 0, 3);
-	for (uint32_t i = 0; i < 4; i++) {
-		struct raft_append m = {
-			.target = NODE_N2, .term = 1, .prev_index = i,
-			.prev_term = i ? 1 : 0, .leader_commit = i + 1,
-			.entry_count = 1, .entry_term = 1, .entry = events[i],
-		};
-		uint8_t len = raft_append_encode(&m, body);
-
-		raft_agent_receive(&f, ID_APPEND(NODE_N1), body, len, 10 + i);
-		assert(f.applied_index == i + 1);
-		if (i == 2) { /* down, links remembered */
-			assert(f.network.node_known[NODE_N3] && !f.network.node_up[NODE_N3]);
-			assert(f.network.link_up[NODE_N3][1] && !f.network.link_up[NODE_N3][0]);
-		}
-	}
-	assert(f.network.node_up[NODE_N3]);
-	assert(f.network.link_known[NODE_N3][0] && !f.network.link_up[NODE_N3][0]);
-	assert(f.network.link_known[NODE_N3][1] && f.network.link_up[NODE_N3][1]);
-}
-
 static void test_reject_backoff(void)
 {
 	struct sink lk = {0}, ck = {0};
@@ -255,8 +219,8 @@ static void test_recovery_cancels_stale_loss_and_repairs_graph(void)
 	raft_agent_poll(&client, 60 + RAFT_REPORT_UP_HOLD_MS);
 	assert(client.active_request && client.active_event.type == RAFT_EVENT_NODE_UP);
 
-	/* If the graph shows our own link down (a stale entry), stable local
-	 * link-up observations must restore it without a new physical edge. */
+	/* A committed NODE_DOWN also marked both links down. Stable local
+	 * link-up observations must restore them without a new physical edge. */
 	client.active_request = false;
 	raft_client_observe(&client,
 		(struct raft_event){RAFT_EVENT_CANLINK_UP, NODE_N3, 0, 0}, 200);
@@ -396,197 +360,9 @@ static void test_isolated_follower_does_not_raise_term(void)
 	assert_same_committed_log(&s.nodes[NODE_N1], &s.nodes[NODE_N3]);
 }
 
-/*
- * Far side of a hop: N3 sees its own A link go down and the leader commits
- * the report, but the APPEND carrying it has not reached N3 yet. N3 must not
- * re-send the report as a graph repair on every reply (seen on hardware as
- * about 10 CLIENT_UPDATEs per second) - at most once per settle period.
- */
-static void test_repair_waits_for_committed_entry(void)
-{
-	struct sink k = {0};
-	struct raft_agent a;
-	const struct raft_event down = {RAFT_EVENT_CANLINK_DOWN, NODE_N3, 0, 0};
-	uint32_t t;
-
-	raft_agent_init(&a, NODE_N3, sink_send, &k, 0, 9);
-	/* Committed graph (log 19) still says N3's link A is up. */
-	a.network.link_known[NODE_N3][0] = true;
-	a.network.link_up[NODE_N3][0] = true;
-	a.commit_index = a.applied_index = a.last_index = 19;
-
-	raft_client_observe(&a, down, 0);
-	for (t = 0; t <= RAFT_REPORT_DOWN_HOLD_MS; t += 5) {
-		raft_agent_poll(&a, t);
-	}
-	assert(a.active_request && k.updates == 1);
-
-	/* The leader answers COMMITTED at index 20; N3 never receives entry 20. */
-	struct raft_client_reply r = {.target = NODE_N3, .request_id = a.active_request_id,
-				      .status = RAFT_CLIENT_COMMITTED, .leader = NODE_N1,
-				      .committed_index = 20};
-	uint8_t body[RAFT_CLIENT_REPLY_LEN];
-
-	raft_client_reply_encode(&r, body);
-	raft_agent_receive(&a, ID_CLIENT_REPLY(NODE_N1), body, sizeof(body), t);
-	assert(!a.active_request);
-	uint32_t replied = t;
-
-	for (; t < replied + RAFT_REPAIR_SETTLE_MS - 5; t += 5) {
-		raft_agent_poll(&a, t);
-	}
-	assert(k.updates == 1); /* held while waiting for entry 20 */
-
-	/* After the settle period the repair is allowed again, once. */
-	for (; t <= replied + RAFT_REPAIR_SETTLE_MS + 50; t += 5) {
-		raft_agent_poll(&a, t);
-	}
-	assert(k.updates == 2);
-
-	/* Once entry 20 is applied the graph agrees and nothing more is sent. */
-	a.network.link_up[NODE_N3][0] = false;
-	a.applied_index = a.commit_index = a.last_index = 20;
-	a.active_request = false;
-	for (t += 5; t < replied + 3 * RAFT_REPAIR_SETTLE_MS; t += 5) {
-		raft_agent_poll(&a, t);
-	}
-	assert(k.updates == 2);
-}
-
-/* Deliver until quiet; long catch-ups need more rounds than pump() allows. */
-static void drain(struct simulation *s, uint32_t now)
-{
-	for (unsigned rounds = 0; rounds < 200000 && s->count; rounds++) {
-		struct message m = s->messages[s->head];
-		int sender = catalog_sender(m.id);
-
-		s->head = (s->head + 1) % MESSAGE_QUEUE_LEN;
-		s->count--;
-		for (int node = 0; node < NUM_NODES; node++) {
-			if (s->active[sender] && s->active[node] && node != sender) {
-				raft_agent_receive(&s->nodes[node], m.id, m.body, m.len, now);
-			}
-		}
-		for (int node = 0; node < NUM_NODES; node++) {
-			if (s->active[node]) {
-				raft_agent_poll(&s->nodes[node], now);
-			}
-		}
-	}
-	assert(s->count == 0);
-}
-
-/* Commit one alternating link change for N2 through leader N1. */
-static void commit_change(struct simulation *s, uint32_t i, uint32_t now)
-{
-	struct raft_event e = {(i & 1) ? RAFT_EVENT_CANLINK_DOWN : RAFT_EVENT_CANLINK_UP,
-			       NODE_N2, 0, 0};
-	uint32_t before = s->nodes[NODE_N1].commit_index;
-
-	deliver_update(&s->nodes[NODE_N1], NODE_N2, i, e, now);
-	raft_agent_poll(&s->nodes[NODE_N1], now);
-	drain(s, now);
-	assert(s->nodes[NODE_N1].commit_index == before + 1);
-}
-
-static void assert_same_state(const struct raft_agent *a, const struct raft_agent *b)
-{
-	assert(a->commit_index == b->commit_index);
-	assert(a->applied_index == b->applied_index);
-	assert(raft_log_hash(a) == raft_log_hash(b));
-	assert(raft_network_pack(&a->network) == raft_network_pack(&b->network));
-}
-
-/*
- * Hardware hit the 64-entry limit within a minute of link tests; every update
- * after that was REJECTED and the graph froze. With compaction the log keeps
- * committing indefinitely, all nodes agree, and the ring never overflows.
- */
-static void test_log_compacts_and_never_fills(void)
-{
-	static struct simulation s;
-	const uint32_t total = 10 * RAFT_WORKING_LOG_ENTRIES;
-
-	memset(&s, 0, sizeof(s));
-	for (int node = 0; node < NUM_NODES; node++) {
-		s.active[node] = true;
-		raft_agent_init(&s.nodes[node], (uint8_t)node, send_message, &s, 0,
-				(uint32_t)(node + 41));
-	}
-	for (uint32_t i = 1; i <= total; i++) {
-		commit_change(&s, i, 10 + i);
-	}
-	for (int node = 0; node < NUM_NODES; node++) {
-		const struct raft_agent *a = &s.nodes[node];
-
-		assert(a->commit_index == total && a->last_index == total);
-		assert(a->snapshot_index > 0);
-		assert(a->last_index - a->snapshot_index <= RAFT_WORKING_LOG_ENTRIES);
-		assert(a->term == 1 && a->leader == NODE_N1);
-		assert_same_state(&s.nodes[NODE_N1], a);
-	}
-	/* Snapshot + tail must reproduce the applied graph exactly. */
-	struct raft_network check = s.nodes[NODE_N3].snapshot_network;
-	for (uint32_t i = s.nodes[NODE_N3].snapshot_index + 1; i <= total; i++) {
-		struct raft_log_entry e;
-
-		assert(raft_log_entry(&s.nodes[NODE_N3], i, &e));
-		if (e.event.type == RAFT_EVENT_CANLINK_UP) {
-			check.link_up[NODE_N2][0] = true;
-		} else {
-			check.link_up[NODE_N2][0] = false;
-		}
-		check.link_known[NODE_N2][0] = true;
-	}
-	assert(raft_network_pack(&check) == raft_network_pack(&s.nodes[NODE_N3].network));
-}
-
-/*
- * A follower that missed more than the leader still holds (the far side of a
- * long hop, or an STM32 back from reset) gets INSTALL_SNAPSHOT, then the
- * remaining entries, and ends with the same log hash and graph.
- */
-static void test_lagging_follower_gets_snapshot(void)
-{
-	static struct simulation s;
-	const uint32_t total = 4 * RAFT_WORKING_LOG_ENTRIES;
-
-	memset(&s, 0, sizeof(s));
-	for (int node = 0; node < NUM_NODES; node++) {
-		raft_agent_init(&s.nodes[node], (uint8_t)node, send_message, &s, 0,
-				(uint32_t)(node + 77));
-	}
-	s.active[NODE_N1] = s.active[NODE_N2] = true;
-	for (uint32_t i = 1; i <= total; i++) {
-		commit_change(&s, i, 10 + i);
-	}
-	const struct raft_agent *leader = &s.nodes[NODE_N1];
-
-	assert(leader->snapshot_index > 1); /* N3 needs entry 1: compacted */
-	assert(s.nodes[NODE_N3].last_index == 0);
-
-	s.active[NODE_N3] = true;
-	uint32_t now = 10 + total + RAFT_EMPTY_APPEND_MS; /* next empty APPEND */
-
-	raft_agent_poll(&s.nodes[NODE_N1], now);
-	drain(&s, now);
-	assert(s.nodes[NODE_N3].snapshot_index >= leader->snapshot_index);
-	assert(s.nodes[NODE_N3].last_index == total);
-	assert_same_state(leader, &s.nodes[NODE_N3]);
-	assert(s.nodes[NODE_N3].term == 1 && s.nodes[NODE_N3].leader == NODE_N1);
-
-	/* And it keeps replicating normally afterwards. */
-	commit_change(&s, total + 1, now + 1);
-	assert_same_state(leader, &s.nodes[NODE_N3]);
-}
-
 int main(void)
 {
-	test_log_compacts_and_never_fills();
-	test_lagging_follower_gets_snapshot();
-	test_repair_waits_for_committed_entry();
 	test_commit_stops_at_matching_prefix();
-	test_node_down_keeps_links();
 	test_reject_backoff();
 	test_debounce_and_coalesce();
 	test_stale_peer_loss_is_rejected();

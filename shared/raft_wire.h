@@ -78,21 +78,6 @@ struct raft_append {
 	struct raft_event entry;
 };
 
-/*
- * INSTALL_SNAPSHOT replaces a follower's log up to index with the leader's
- * compacted state: the network graph after applying entries 1..index (packed
- * by raft_network_pack) and the running hash of those entries, so consoles can
- * still compare logs after compaction. The follower answers with APPEND_ACK.
- */
-struct raft_snapshot {
-	uint8_t target; /* NODE_N1..NODE_N3 */
-	uint32_t term;
-	uint32_t index;      /* last log index folded into the snapshot */
-	uint32_t last_term;  /* term of that entry */
-	uint32_t state;      /* packed network graph */
-	uint32_t hash;       /* running log hash through index */
-};
-
 struct raft_append_ack {
 	uint32_t term;
 	uint32_t match_index; /* or next index to try when success = 0 */
@@ -127,7 +112,6 @@ struct raft_client_reply {
 #define RAFT_APPEND_ACK_LEN   10u
 #define RAFT_CLIENT_UPDATE_LEN 9u
 #define RAFT_CLIENT_REPLY_LEN 11u
-#define RAFT_SNAPSHOT_LEN     21u
 
 static inline void raft_put_u16(uint8_t *p, uint16_t x)
 {
@@ -257,28 +241,6 @@ static inline bool raft_append_decode(const uint8_t *in, uint8_t len, struct raf
 		raft_event_decode(in + 22, &m->entry);
 	}
 	return true;
-}
-
-static inline void raft_snapshot_encode(const struct raft_snapshot *m,
-					uint8_t out[RAFT_SNAPSHOT_LEN])
-{
-	out[0] = m->target;
-	raft_put_u32(out + 1, m->term);
-	raft_put_u32(out + 5, m->index);
-	raft_put_u32(out + 9, m->last_term);
-	raft_put_u32(out + 13, m->state);
-	raft_put_u32(out + 17, m->hash);
-}
-
-static inline void raft_snapshot_decode(const uint8_t in[RAFT_SNAPSHOT_LEN],
-					struct raft_snapshot *m)
-{
-	m->target = in[0];
-	m->term = raft_get_u32(in + 1);
-	m->index = raft_get_u32(in + 5);
-	m->last_term = raft_get_u32(in + 9);
-	m->state = raft_get_u32(in + 13);
-	m->hash = raft_get_u32(in + 17);
 }
 
 static inline void raft_append_ack_encode(const struct raft_append_ack *m,

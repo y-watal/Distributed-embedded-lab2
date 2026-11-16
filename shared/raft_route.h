@@ -50,63 +50,51 @@ static inline bool raft_route_send_on_bus(uint32_t bits, int self, int bus,
 {
 	/* Never trust a stale graph over the only locally usable bus. */
 	if (!other_usable || !raft_route_has_peer(bits, self, 1 - bus)) return true;
-	/* The graph decides only whether anyone is reachable on this bus. Our
-	 * own link is a local fact the caller already checked (bus running, not
-	 * degraded): trusting the graph for it deadlocked N3 on the bench, whose
-	 * stale graph marked its own links down, so it stopped sending the very
-	 * acks that would have brought the graph up to date. */
-	return raft_route_has_peer(bits, self, bus);
+	return raft_route_link_may_be_up(bits, self, bus) &&
+	       raft_route_has_peer(bits, self, bus);
 }
 
-/*
- * The one node that bridges the buses for frames from sender: the lowest-ID
- * live node, other than the sender, with both links. Every node computes the
- * same answer from the same committed graph, so exactly one node relays a
- * given sender's traffic and no node is special. -1 if none can.
- */
-static inline int raft_route_bridge(uint32_t bits, int sender)
-{
-	for (int node = 0; node < NUM_NODES; node++) {
-		if (node != sender && raft_route_node_may_be_up(bits, node) &&
-		    raft_route_link_may_be_up(bits, node, 0) &&
-		    raft_route_link_may_be_up(bits, node, 1)) return node;
-	}
-	return -1;
-}
-
-static inline bool raft_route_link_known_down(uint32_t bits, int node, int bus)
-{
-	int link = node * 2 + bus;
-
-	return (bits & (1u << (6 + link))) && !(bits & (1u << (12 + link)));
-}
-
-/*
- * Graph-only relay decision, identical on every node. self forwards a frame
- * from sender, received on src_bus, onto the other bus if and only if:
- *   - self is the bridge for that sender (raft_route_bridge); and
- *   - some live node other than the sender and self is committed off
- *     src_bus but may be on the other bus, so it cannot hear the frame
- *     any other way.
- * The sender's own link on the other bus is deliberately not consulted. A
- * node that just lost that link can only report it through this relay, so
- * trusting the stale "sender is on the other bus" deadlocked the hop when
- * N1 lost B before N3 lost A. The cost is a duplicate copy while exactly one
- * link is down; receivers already discard duplicates.
- * Until a link change is committed nothing is relayed for it; the handout
- * (Part 5.2) expects a few rounds before the routes are set up.
- */
-static inline bool raft_route_relay(uint32_t bits, int self, int sender, int src_bus)
+static inline bool raft_route_relay(uint32_t bits, int sender, int src_bus)
 {
 	int dst_bus = 1 - src_bus;
 
-	if (sender < 0 || sender >= NUM_NODES || sender == self) return false;
-	if (raft_route_bridge(bits, sender) != self) return false;
+	if (sender < 0 || sender >= NUM_NODES || sender == NODE_N2) return false;
+	/* When the sender is already on the destination bus, its own copy
+	 * reaches any destination there. N2 need not forward another copy. */
+	int sender_dst_link = sender * 2 + dst_bus;
+	if ((bits & (1u << (6 + sender_dst_link))) &&
+	    (bits & (1u << (12 + sender_dst_link)))) return false;
+	/* An incomplete or stale graph cannot safely suppress the Lab 3 relay. */
+	if (!raft_route_link_may_be_up(bits, sender, src_bus)) return true;
 	for (int node = 0; node < NUM_NODES; node++) {
-		if (node != sender && node != self &&
-		    raft_route_node_may_be_up(bits, node) &&
-		    raft_route_link_known_down(bits, node, src_bus) &&
+		if (node == sender || node == NODE_N2) continue;
+		if (!(bits & (1u << node)) ||
+		    !(bits & (1u << (6 + node * 2 + src_bus))) ||
+		    !(bits & (1u << (6 + node * 2 + dst_bus)))) return true;
+		if (raft_route_node_may_be_up(bits, node) &&
+		    !raft_route_link_may_be_up(bits, node, src_bus) &&
 		    raft_route_link_may_be_up(bits, node, dst_bus)) return true;
+	}
+	return false;
+}
+
+/* N2 sees N1/N3 heartbeats directly on each physical bus. While a link
+ * change has not yet committed, those fresh observations can reveal a hop. */
+static inline bool raft_route_live_hop(uint32_t now_ms,
+				      const uint32_t last_hb[2][NUM_NODES],
+				      int sender, int src_bus, uint32_t timeout_ms)
+{
+	int dst_bus = 1 - src_bus;
+
+	if (sender < 0 || sender >= NUM_NODES || sender == NODE_N2) return false;
+	uint32_t sender_dst = last_hb[dst_bus][sender];
+	if (sender_dst && now_ms - sender_dst <= timeout_ms) return false;
+	for (int node = 0; node < NUM_NODES; node++) {
+		if (node == sender || node == NODE_N2) continue;
+		uint32_t peer_dst = last_hb[dst_bus][node];
+		uint32_t peer_src = last_hb[src_bus][node];
+		if (peer_dst && now_ms - peer_dst <= timeout_ms &&
+		    (!peer_src || now_ms - peer_src > timeout_ms)) return true;
 	}
 	return false;
 }

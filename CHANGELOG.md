@@ -63,15 +63,18 @@ bus showed afterwards. Wire formats and rules are in
   and at least every 500 ms. A mode change no longer restarts the phase, so
   the first toggle after a change can come sooner than 500 ms. A new Pi test
   checks that hazard toggles are 250 ms apart.
-- **System time:** follower STM32s call `clock_settime(CLOCK_REALTIME)` after
-  each REF they use (`CONFIG_POSIX_TIMERS=y`). The SYNC line adds `sys=` and
-  `ratio=`.
+- **System time:** follower STM32s call Zephyr's
+  `sys_clock_settime(SYS_CLOCK_REALTIME)` after each REF they use. The SYNC
+  line adds `sys=` and `ratio=`.
 - **Tests:** `tests/blink_phase_test.c`. On the Pi, BLINK and UDP-timeout
   checks fail now and then on this code and on the committed code (1 run in
   6), when the test's simulated wheel stalls for more than 90 ms.
 - **Unverified:** the STM32 build, and FL/RL alignment on the scope.
-  `clock_settime()` comes from the standard `<time.h>` (Zephyr 4.4.99 moved
-  it off `<zephyr/posix/time.h>`), with `CONFIG_POSIX_TIMERS=y`.
+- **Zephyr 4.4.99:** `<zephyr/posix/time.h>` is gone, and the libc's
+  `<time.h>` does not declare POSIX `clock_settime()`/`clock_gettime()`
+  (implicit-declaration errors on the Mac build). The native
+  `sys_clock_settime()`/`sys_clock_gettime()` from `<zephyr/sys/clock.h>`
+  replace them, so `CONFIG_POSIX_TIMERS` is no longer set.
 
 ## 2026-11-12
 

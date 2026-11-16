@@ -1,7 +1,8 @@
 #include "gtime.h"
 
 #include <zephyr/kernel.h>
-#include <time.h> /* clock_settime(), CONFIG_POSIX_TIMERS; Zephyr 4.4.99 standard path */
+#include <time.h>             /* struct timespec */
+#include <zephyr/sys/clock.h>  /* sys_clock_settime(), sys_clock_gettime() */
 #include <zephyr/sys/printk.h>
 
 #include "catalog.h"
@@ -77,7 +78,9 @@ uint64_t global_gettime(void)
 
 /*
  * Handout 6.1, "Updating Zephyr on Followers": set the system clock from the
- * adjusted leader time after each REF. CLOCK_REALTIME then reads global time
+ * adjusted leader time after each REF. Zephyr's native sys_clock_settime()
+ * is the kernel call under POSIX clock_settime(), which Zephyr 4.4.99's libc
+ * does not declare by default. SYS_CLOCK_REALTIME then reads global time
  * at kernel-tick resolution; global_gettime() stays the precise source (it
  * applies the drift ratio and microsecond timestamps).
  */
@@ -89,14 +92,14 @@ static void update_system_time(void)
 		.tv_nsec = (long)(g % 1000000u) * 1000L,
 	};
 
-	(void)clock_settime(CLOCK_REALTIME, &ts);
+	(void)sys_clock_settime(SYS_CLOCK_REALTIME, &ts);
 }
 
 static uint64_t system_time_us(void)
 {
 	struct timespec ts;
 
-	if (clock_gettime(CLOCK_REALTIME, &ts) != 0) {
+	if (sys_clock_gettime(SYS_CLOCK_REALTIME, &ts) != 0) {
 		return 0;
 	}
 	return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;

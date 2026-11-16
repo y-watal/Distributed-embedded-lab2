@@ -134,8 +134,9 @@ Pi in `node1_pi/gtime.c`. All times are microseconds.
   last `REF`. `refs` and `stale` are per-second counts.
 
 - **System time.** After each `REF` it uses, a follower STM32 also sets
-  Zephyr's `CLOCK_REALTIME` with `clock_settime()` (`CONFIG_POSIX_TIMERS`), as
-  handout 6.1 asks. `CLOCK_REALTIME` has kernel-tick resolution;
+  Zephyr's realtime clock with `sys_clock_settime(SYS_CLOCK_REALTIME)`, the
+  kernel call under POSIX `clock_settime()`, as handout 6.1 asks. It has
+  kernel-tick resolution;
   `global_gettime()` stays the precise source. The `SYNC:` line prints both
   (`sys=`), plus the drift ratio `(L2 − L1) / (F2 − F1)` itself (`ratio=`).
 - **Blinkers.** A lamp is lit during the first half of each period of global

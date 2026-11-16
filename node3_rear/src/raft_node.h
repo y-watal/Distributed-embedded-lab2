@@ -12,6 +12,8 @@ void raft_node_receive(const struct can_frame *frame);
 bool raft_node_report_event(struct raft_event event);
 void raft_node_get_network(struct raft_network *out);
 uint32_t raft_node_route_snapshot(void);
+/* Leader as last seen by the Raft thread (-1 unknown); safe from any thread. */
+void raft_node_leader_snapshot(int *leader, bool *is_leader);
 void raft_node_print_status(void);
 
 #endif /* RAFT_NODE_H */

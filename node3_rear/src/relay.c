@@ -8,13 +8,14 @@
 #include "node_config.h"
 #include "tp.h"
 #include "wcet.h"
+#include "gtime.h"
 
 struct relay_stats relay_stats;
 
 #if RELAY_ENABLED
 
 #define RELAY_STACK_SIZE  1024
-#define RELAY_QUEUE_DEPTH 16
+#define RELAY_QUEUE_DEPTH 32 /* a Raft fragment may now wait up to ~3 ms for a buffer */
 #define RELAY_URGENT_DEPTH 8
 
 struct relay_item {
@@ -54,8 +55,15 @@ static void forward(const struct relay_item *item)
 		atomic_inc(&relay_stats.skipped);
 		return;
 	}
+	struct can_frame out = item->frame;
+
+	if ((out.id & ~3u) == ID_REF(0)) {
+		/* Our own global time replaces the leader's, so the relay delay
+		 * is not seen as clock offset on the far side. */
+		gtime_restamp_relayed_ref(&out);
+	}
 	tp_toggle(TP_RELAY_TX);
-	if (canbus_forward_at(dst, &item->frame, item->t_rx) == 0) {
+	if (canbus_forward_at(dst, &out, item->t_rx) == 0) {
 		atomic_inc(&relay_stats.forwarded);
 	}
 }
@@ -66,22 +74,68 @@ static void forward(const struct relay_item *item)
  * meanwhile, so urgent frames never queue behind Raft. Returns false if the
  * wait ran out; the fragment is then relayed anyway.
  */
+static void forward_waiting_urgent(void)
+{
+	struct relay_item urgent;
+
+	while (k_msgq_get(&relay_urgent_q, &urgent, K_NO_WAIT) == 0) {
+		(void)k_sem_take(&relay_due, K_NO_WAIT); /* its count */
+		forward(&urgent);
+	}
+}
+
 static bool wait_raft_room(int dst)
 {
 	uint32_t start = k_cycle_get_32();
-	struct relay_item urgent;
 
 	while (!canbus_raft_tx_ready(dst)) {
-		while (k_msgq_get(&relay_urgent_q, &urgent, K_NO_WAIT) == 0) {
-			(void)k_sem_take(&relay_due, K_NO_WAIT); /* its count */
-			forward(&urgent);
-		}
+		forward_waiting_urgent();
 		if (k_cyc_to_us_floor32(k_cycle_get_32() - start) >= RAFT_TX_RESERVE_WAIT_US) {
 			return false;
 		}
 		k_sleep(K_USEC(100));
 	}
 	return true;
+}
+
+/*
+ * Bulk Raft fragment: never dropped just because the TX buffers are briefly
+ * full (the driver frees a buffer a little after its TX callback). Retry in
+ * RELAY_RAFT_TRY_US slices for up to RELAY_RAFT_TX_WAIT_US, forwarding any
+ * CTRL or FAULT between tries, like N2's own Raft sends.
+ */
+static void forward_raft(const struct relay_item *item)
+{
+	int dst = item->src_bus == BUS_A ? BUS_B : BUS_A;
+
+	if (canbus_is_degraded(dst) || !canbus_bus_running(dst)) {
+		atomic_inc(&relay_stats.skipped);
+		return;
+	}
+	if (!wait_raft_room(dst)) {
+		atomic_inc(&relay_stats.raft_late); /* relayed without the reserve */
+	}
+	uint32_t start = k_cycle_get_32();
+
+	tp_toggle(TP_RELAY_TX);
+	for (;;) {
+		int ret = canbus_forward_try(dst, &item->frame, item->t_rx,
+					     K_USEC(RELAY_RAFT_TRY_US));
+
+		if (ret == 0) {
+			atomic_inc(&relay_stats.forwarded);
+			return;
+		}
+		if (ret != -EAGAIN) {
+			return; /* bus down or degraded meanwhile; counted by canbus */
+		}
+		if (k_cyc_to_us_floor32(k_cycle_get_32() - start) >= RELAY_RAFT_TX_WAIT_US) {
+			atomic_inc(&relay_stats.raft_lost);
+			canbus_note_tx_full(dst);
+			return;
+		}
+		forward_waiting_urgent();
+	}
 }
 
 static void relay_thread(void *p1, void *p2, void *p3)
@@ -103,15 +157,14 @@ static void relay_thread(void *p1, void *p2, void *p3)
 		}
 		wcet_begin(&job);
 
-		int dst = item.src_bus == BUS_A ? BUS_B : BUS_A;
 		bool raft_bulk = catalog_is_raft(item.frame.id) &&
 				 (item.frame.id & ~3u) != ID_REF(0);
 
-		if (raft_bulk && canbus_bus_running(dst) && !canbus_is_degraded(dst) &&
-		    !wait_raft_room(dst)) {
-			atomic_inc(&relay_stats.raft_late); /* relayed without the reserve */
+		if (raft_bulk) {
+			forward_raft(&item);
+		} else {
+			forward(&item);
 		}
-		forward(&item);
 	}
 }
 

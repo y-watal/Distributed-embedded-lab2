@@ -93,6 +93,51 @@ old or repeated cycle numbers. The cycle number is not a Raft term. Terms are
 carried in the Raft vote and append messages. When leadership changes, the new
 leader continues the agreed global time and chooses its next cycle number.
 
+### Time synchronization from `REF`
+
+`shared/timesync.c` holds the model; the STM32s wrap it in `gtime.c` and the
+Pi in `node1_pi/gtime.c`. All times are microseconds.
+
+- **Stamping.** The leader writes `global_gettime()` into bytes 0–5 per bus,
+  just before the frame goes to the controller (`canbus_send_raft()` on an
+  STM32, `send_on_j()` on the Pi). The Pi sends `REF` on its Lab 3 socket
+  (pfifo_fast band 0), not the bulk Raft socket. The A and B copies therefore
+  carry slightly different stamps and are no longer byte-identical.
+- **Receiving.** A follower uses only `REF` from the node its Raft agent calls
+  leader, timestamped in `rx_cb` (STM32) or right after `read()` (Pi). The
+  first copy of each cycle number is used; the other bus's copy or a relayed
+  copy counts as `stale`.
+- **Offset.** `measured = L + TIMESYNC_REF_DELAY_US` (350 µs: controller load,
+  one 8-byte frame at 500 kbit/s, receiver interrupt and SPI read). The
+  error against the running model is halved and clamped to ±50 µs per `REF`,
+  so a new leader's clock is slewed in and never stepped by more than 50 µs.
+  An error over 2 ms (first sync, or a rebooted master) is stepped.
+- **Drift.** `(L2 − L1) / (F2 − F1)` over at least 1 s of `REF` from one
+  master, averaged over about four windows, in ppb. Between `REF`s,
+  `global = base_global + dl·(1 + drift)`, so holdover keeps the rate.
+- **Leader.** A leader keeps running its own model, so an elected follower
+  continues the agreed time without a step. A node that has never synced
+  (the Pi at boot) uses its local clock: the epoch is its boot.
+- **Relay.** N2 restamps a leader's `REF` with its own global time just before
+  forwarding it, so the relay delay does not appear as clock offset on the far
+  side.
+- **SYNC.** A node is synchronized if it leads, or if it heard its master within
+  1 s (`TIMESYNC_HOLDOVER_US`).
+- **PPS.** At every whole global second, a thread (priority 6 on the STM32s)
+  sleeps until 0.4 ms before the edge, then spins onto it. It drives `TP_PPS`
+  high for 100 ms and records a snapshot, which the 1 s report prints as:
+
+  `SYNC: global=S.us local=S.us master=N1 synced=1 drift=±X.XXXppm err=Eus corr=Cus driftcorr=Dus refs=R stale=S steps=T`
+
+  `err` is the offset the last `REF` measured, and `corr` is how far that
+  `REF` moved the clock. `driftcorr` is the rate correction applied since the
+  last `REF`. `refs` and `stale` are per-second counts.
+
+`TP_PPS`, `TP_SYNC`, `TP_LEADER` and `TP_REF_RX` are defined in `tp.h`.
+They do nothing until `app.overlay` assigns them pins (`pps-gpios`,
+`sync-gpios`, `leader-gpios`, `ref-rx-gpios`). On the Pi, PPS waits for a
+`PPS_GPIO` BCM number.
+
 ## Other messages: fragmentation
 
 Every non-`REF` body is a byte string encoded below. It is split into five-byte

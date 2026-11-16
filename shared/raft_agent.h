@@ -36,6 +36,11 @@ struct raft_observation {
 	bool reported;    /* a debounced value has been queued */
 	bool reported_up; /* that value */
 	uint32_t since_ms;
+	/* Leader's COMMITTED index for this subject, and when it arrived. A
+	 * self-link the graph disagrees with is not reported again until that
+	 * index is applied here or RAFT_CLIENT_REPAIR_HOLD_MS has passed. */
+	uint32_t committed_index;
+	uint32_t committed_ms;
 };
 
 /* Sends one complete logical body. The platform adapter fragments it for CAN. */

@@ -46,6 +46,7 @@
 #include <unistd.h>
 
 #include "catalog_pi.h"
+#include "gtime.h"
 #include "raft_node.h"
 #include "raft_config.h"
 #include "raft_route.h"
@@ -238,8 +239,18 @@ static bool send_on_j(int bus, uint32_t id, const uint8_t data[FRAME_DLC], bool 
 		return false;
 	}
 	memcpy(f.data, data, FRAME_DLC);
+	/*
+	 * REF is one frame whose timestamp is time-sync error if it waits, so it
+	 * goes in the Lab 3 band (behind CTRL and HB only) and is stamped with
+	 * global time per bus just before write().
+	 */
+	bool is_ref = (id & ~3u) == ID_REF(0);
+
+	if (is_ref) {
+		gtime_stamp_ref(f.data);
+	}
 	tp_toggle(tp_tx[bus]);
-	int fd = catalog_is_raft(id) ? raft_fd[bus] : can_fd[bus];
+	int fd = catalog_is_raft(id) && !is_ref ? raft_fd[bus] : can_fd[bus];
 
 	if (write(fd, &f, sizeof(f)) != (ssize_t)sizeof(f)) {
 		atomic_fetch_add(&tx_err[bus], 1); /* queue full (no ACK) or interface down */
@@ -646,6 +657,9 @@ static void *can_rx_thread(void *arg)
 				if (catalog_is_raft(id) && f.can_dlc == FRAME_DLC) {
 					/* skip our own frames: Raft-socket echo, N2 relay */
 					if (catalog_sender(id) != NODE_N1) {
+						if ((id & ~3u) == ID_REF(0)) {
+							gtime_on_ref(id, f.data, now);
+						}
 						raft_node_receive(id, f.data);
 					}
 					continue;
@@ -1062,6 +1076,7 @@ static void *report_thread(void *arg)
 		       atomic_exchange(&fault_rx, 0), atomic_load(&force_last),
 		       atomic_exchange(&force_fwd, 0));
 		raft_node_print_status();
+		gtime_report();
 		if (++reports % J_REPORT_EVERY == 0) {
 			printf("  J, trigger -> write() returned, us: max since start / max last %d s / mean (frames)\n",
 			       J_REPORT_EVERY);
@@ -1288,6 +1303,7 @@ int main(int argc, char **argv)
 		proxy_addr.sin_addr.s_addr = inet_addr(opt.force_host);
 		have_proxy = true;
 	}
+	gtime_init();
 	if (raft_node_init(raft_emit_frame) < 0) {
 		fprintf(stderr, "could not start Raft agent\n");
 		return 1;

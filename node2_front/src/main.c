@@ -13,6 +13,7 @@
  *   blink      (5)         this zone's two blinker lamps
  *   test_btn   (5)         USER button B1 -> local fault / recover
  *   pid        (6, N3)     encoders -> motor duty every 10 ms
+ *   pps        (6)         Lab 5: PPS edge on each global second, SYNC snapshot
  *   hb_tx      (7)         HB every 20 ms on both buses
  *   hb_mon     (8)         every 5 ms: DEG_A/B, zone lost, zone state, ERR, watchdog
  *   force      (9, N2)     FORCE every 50 ms
@@ -28,6 +29,7 @@
 #include "blink.h"
 #include "button.h"
 #include "canbus.h"
+#include "gtime.h"
 #include "ctrl.h"
 #include "hb.h"
 #include "lab3_config.h"
@@ -45,6 +47,9 @@
 static void on_frame(const struct can_frame *frame, int bus)
 {
 	if (catalog_is_raft(frame->id)) {
+		if ((frame->id & ~3u) == ID_REF(0)) {
+			gtime_on_ref(frame, canbus_rx_cycles()); /* before any queueing */
+		}
 		raft_node_receive(frame);
 		return;
 	}
@@ -73,6 +78,7 @@ int main(void)
 	tp_set(TP_DEG_A, 1);
 	tp_set(TP_DEG_B, 1);
 
+	gtime_init(); /* before CAN: the first REF may arrive at once */
 	canbus_set_handler(on_frame);
 	if (canbus_init() < 0) {
 		printk("no CAN controller came up\n");

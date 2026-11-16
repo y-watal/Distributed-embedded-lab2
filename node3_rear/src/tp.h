@@ -31,6 +31,11 @@ enum tp_id {
 	TP_PWM_SET,   /* motor duty written (N3) */
 	TP_DIR_A,     /* unused: on N3 the DIR_A row is the H-bridge IN1 pin itself */
 	TP_SRV,       /* servo duty set (N2): once per CTRL STEER acts on, and on re-centering */
+	/* Lab 5. No-ops until the overlay names a pin for them. */
+	TP_PPS,       /* rising edge at every whole second of global_gettime(), 100 ms high */
+	TP_SYNC,      /* LED: leader, or follower within holdover of its last REF */
+	TP_LEADER,    /* LED: this node is the Raft leader (and time master) */
+	TP_REF_RX,    /* toggles on each REF accepted for time sync */
 	TP_COUNT
 };
 

@@ -10,6 +10,8 @@
 int raft_node_init(void);
 void raft_node_receive(const struct can_frame *frame);
 bool raft_node_report_event(struct raft_event event);
+/* Drop a local observation without logging it (raft_client_forget). */
+bool raft_node_forget_event(struct raft_event event);
 void raft_node_get_network(struct raft_network *out);
 uint32_t raft_node_route_snapshot(void);
 /* Leader as last seen by the Raft thread (-1 unknown); safe from any thread. */

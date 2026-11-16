@@ -61,6 +61,17 @@ static void deliver_update(struct raft_agent *leader, uint8_t from, uint32_t req
 	raft_agent_receive(leader, ID_CLIENT_UPDATE(from), body, sizeof(body), now);
 }
 
+/* The default leader listens RAFT_BOOT_LISTEN_MS before taking term 1. Most
+ * tests start from a fresh cluster, so finish that boot right away. */
+static void boot_as_default_leader(struct raft_agent *a)
+{
+	if (a->boot_listen) {
+		a->boot_listen_until_ms = 0;
+		a->boot_listen = true;
+		raft_agent_poll(a, 0);
+	}
+}
+
 static void test_commit_stops_at_matching_prefix(void)
 {
 	struct sink k = {0};
@@ -73,6 +84,7 @@ static void test_commit_stops_at_matching_prefix(void)
 	uint8_t body[RAFT_APPEND_ENTRY_LEN];
 
 	raft_agent_init(&follower, NODE_N3, sink_send, &k, 0, 3);
+	boot_as_default_leader(&follower);
 	follower.last_index = 2;
 	follower.log[0].term = 1;
 	follower.log[0].event = append.entry;
@@ -104,8 +116,10 @@ static void test_reject_backoff(void)
 	const struct raft_event e = {RAFT_EVENT_CANLINK_DOWN, NODE_N2, 0, 0};
 
 	raft_agent_init(&leader, NODE_N1, sink_send, &lk, 0, 1);
+	boot_as_default_leader(&leader);
 	raft_agent_init(&client, NODE_N2, sink_send, &ck, 0, 2);
-	leader.last_index = RAFT_WORKING_LOG_ENTRIES; /* full working log */
+	boot_as_default_leader(&client);
+	leader.last_index = RAFT_LOG_CAPACITY; /* log_size reached */
 
 	/* Remote client: one REJECTED, then one retry per second, not ten. */
 	assert(raft_client_report(&client, e));
@@ -143,6 +157,7 @@ static void test_debounce_and_coalesce(void)
 	uint32_t t;
 
 	raft_agent_init(&a, NODE_N2, sink_send, &k, 0, 3);
+	boot_as_default_leader(&a);
 
 	/* The first observation is reported once it has held. */
 	raft_client_observe(&a, up, 0);
@@ -185,6 +200,7 @@ static void test_stale_peer_loss_is_rejected(void)
 	struct raft_event down = {RAFT_EVENT_NODE_DOWN, NODE_N2, RAFT_BUS_NONE, 0};
 
 	raft_agent_init(&leader, NODE_N1, sink_send, &sink, 0, 1);
+	boot_as_default_leader(&leader);
 	raft_client_observe(&leader,
 		(struct raft_event){RAFT_EVENT_NODE_UP, NODE_N2, RAFT_BUS_NONE, 0}, 1);
 	deliver_update(&leader, NODE_N3, 7, down, 2);
@@ -211,6 +227,7 @@ static void test_recovery_cancels_stale_loss_and_repairs_graph(void)
 	struct raft_event up = {RAFT_EVENT_NODE_UP, NODE_N1, RAFT_BUS_NONE, 0};
 
 	raft_agent_init(&client, NODE_N3, sink_send, &sink, 0, 3);
+	boot_as_default_leader(&client);
 	raft_client_observe(&client, down, 1);
 	raft_agent_poll(&client, 1 + RAFT_REPORT_DOWN_HOLD_MS);
 	assert(client.active_request && client.active_event.type == RAFT_EVENT_NODE_DOWN);
@@ -242,6 +259,7 @@ static void test_committed_reply_holds_graph_repair(void)
 	struct raft_event down = {RAFT_EVENT_CANLINK_DOWN, NODE_N3, 0, 0};
 
 	raft_agent_init(&client, NODE_N3, sink_send, &sink, 0, 3);
+	boot_as_default_leader(&client);
 	client.network.link_known[NODE_N3][0] = true;
 	client.network.link_up[NODE_N3][0] = true; /* stale: entry 20 not applied */
 	client.applied_index = 19;
@@ -277,9 +295,17 @@ static void test_committed_reply_holds_graph_repair(void)
 	assert(client.active_request);
 }
 
+static void pump_rounds(struct simulation *s, uint32_t now, unsigned max_rounds);
+
 static void pump(struct simulation *s, uint32_t now)
 {
-	for (unsigned rounds = 0; rounds < 100 && s->count; rounds++) {
+	pump_rounds(s, now, 100);
+}
+
+/* Deliver queued messages (and poll every node after each) until none remain. */
+static void pump_rounds(struct simulation *s, uint32_t now, unsigned max_rounds)
+{
+	for (unsigned rounds = 0; rounds < max_rounds && s->count; rounds++) {
 		struct message m = s->messages[s->head];
 		s->head = (s->head + 1) % MESSAGE_QUEUE_LEN;
 		s->count--;
@@ -324,6 +350,7 @@ static void test_returning_follower_catches_up(void)
 	for (int node = 0; node < NUM_NODES; node++) {
 		raft_agent_init(&s.nodes[node], (uint8_t)node, send_message, &s, 0,
 				(uint32_t)(node + 1));
+		boot_as_default_leader(&s.nodes[node]);
 	}
 	s.active[NODE_N1] = true;
 	s.active[NODE_N2] = true;
@@ -346,6 +373,7 @@ static void test_returning_follower_catches_up(void)
 
 	/* A reboot loses N3's RAM log and must trigger the same catch-up again. */
 	raft_agent_init(&s.nodes[NODE_N3], NODE_N3, send_message, &s, 120, 3);
+	boot_as_default_leader(&s.nodes[NODE_N3]);
 	raft_agent_poll(&s.nodes[NODE_N1], 220);
 	pump(&s, 220);
 	assert_same_committed_log(&s.nodes[NODE_N1], &s.nodes[NODE_N3]);
@@ -363,6 +391,7 @@ static void test_isolated_follower_does_not_raise_term(void)
 		s.active[node] = true;
 		raft_agent_init(&s.nodes[node], (uint8_t)node, send_message, &s, 0,
 				(uint32_t)(200 + node * 17));
+		boot_as_default_leader(&s.nodes[node]);
 	}
 	for (uint32_t t = 0; t <= 100; t += 5) {
 		for (int node = 0; node < NUM_NODES; node++) {
@@ -404,6 +433,203 @@ static void test_isolated_follower_does_not_raise_term(void)
 	assert_same_committed_log(&s.nodes[NODE_N1], &s.nodes[NODE_N3]);
 }
 
+
+/* ---- Lab 5 rest: boot listen, compaction, cockpit error, forget ---- */
+
+struct apply_record {
+	unsigned n, live, snapshots;
+	uint32_t snap_index, last_index;
+	bool all_replayed;
+};
+
+static void record_apply(void *ctx, uint32_t index, const struct raft_log_entry *e,
+			 bool replayed, const struct raft_network *net)
+{
+	struct apply_record *r = ctx;
+
+	(void)net;
+	if (!e) {
+		r->snapshots++;
+		r->snap_index = index;
+		return;
+	}
+	assert(index == r->last_index + 1 || r->last_index == 0 || index == r->snap_index + 1);
+	r->last_index = index;
+	r->n++;
+	if (!replayed) {
+		r->live++;
+	}
+}
+
+static void test_boot_listen(void)
+{
+	struct sink k = {0};
+	struct raft_agent pi;
+	uint8_t ref[RAFT_REF_LEN] = {0};
+
+	/* Fresh cluster: nobody else leads, so the cockpit takes term 1. */
+	raft_agent_init(&pi, NODE_N1, sink_send, &k, 0, 1);
+	assert(pi.boot_listen && pi.role == RAFT_FOLLOWER && pi.term == 0);
+	raft_agent_poll(&pi, RAFT_BOOT_LISTEN_MS - 1);
+	assert(pi.role == RAFT_FOLLOWER);
+	raft_agent_poll(&pi, RAFT_BOOT_LISTEN_MS);
+	assert(pi.role == RAFT_LEADER && pi.term == 1 && pi.leader == NODE_N1 && pi.boot_led);
+
+	/* Returning cockpit: N2 leads term 3. Its REF holds off term 1 and its
+	 * APPEND makes the Pi a follower. */
+	raft_agent_init(&pi, NODE_N1, sink_send, &k, 1000, 1);
+	raft_agent_receive(&pi, ID_REF(NODE_N2), ref, sizeof(ref), 1200);
+	raft_agent_poll(&pi, 1000 + RAFT_BOOT_LISTEN_MS);
+	assert(pi.role == RAFT_FOLLOWER && pi.boot_listen);
+
+	struct raft_append ap = {
+		.target = RAFT_TARGET_ALL, .term = 3, .prev_index = 5, .prev_term = 2,
+		.leader_commit = 5,
+	};
+	uint8_t body[RAFT_APPEND_ENTRY_LEN];
+	uint8_t len = raft_append_encode(&ap, body);
+
+	raft_agent_receive(&pi, ID_APPEND(NODE_N2), body, len, 1250);
+	raft_agent_poll(&pi, 1260);
+	assert(pi.role == RAFT_FOLLOWER && pi.term == 3 && pi.leader == NODE_N2);
+	assert(!pi.boot_listen && !pi.boot_led);
+}
+
+static void test_compaction_and_snapshot_catch_up(void)
+{
+	static struct simulation s;
+	struct apply_record rec = {.all_replayed = true};
+	const uint32_t total = RAFT_LOG_WINDOW + 40;
+	uint32_t now = 10;
+
+	memset(&s, 0, sizeof(s));
+	for (int node = 0; node < NUM_NODES; node++) {
+		raft_agent_init(&s.nodes[node], (uint8_t)node, send_message, &s, 0,
+				(uint32_t)(node + 1));
+		boot_as_default_leader(&s.nodes[node]);
+	}
+	s.active[NODE_N1] = true;
+	s.active[NODE_N2] = true;
+	s.nodes[NODE_N3].on_apply = record_apply;
+	s.nodes[NODE_N3].apply_ctx = &rec;
+
+	/* N1 and N2 commit more entries than fit in RAM while N3 is away. */
+	for (uint32_t i = 0; i < total; i++) {
+		struct raft_event e = {i % 2 ? RAFT_EVENT_CANLINK_UP : RAFT_EVENT_CANLINK_DOWN,
+				       NODE_N2, 0, 0};
+
+		deliver_update(&s.nodes[NODE_N1], NODE_N2, i + 1, e, now);
+		raft_agent_poll(&s.nodes[NODE_N1], now);
+		pump(&s, now);
+		assert(s.nodes[NODE_N1].commit_index == i + 1);
+		now += 5;
+	}
+	assert(s.nodes[NODE_N1].log_base > 0);
+	assert(s.nodes[NODE_N1].last_index - s.nodes[NODE_N1].log_base <= RAFT_LOG_WINDOW);
+	assert(s.nodes[NODE_N2].applied_hash == s.nodes[NODE_N1].applied_hash);
+
+	/* N3 returns with an empty log: snapshot, then the entries still in RAM. */
+	s.active[NODE_N3] = true;
+	for (int k = 0; k < 30 && s.nodes[NODE_N3].applied_index < total; k++) {
+		now += 100;
+		raft_agent_poll(&s.nodes[NODE_N1], now);
+		pump_rounds(&s, now, 2000); /* one APPEND + ACK per entry */
+	}
+	assert(s.nodes[NODE_N3].applied_index == total);
+	assert(s.nodes[NODE_N3].applied_hash == s.nodes[NODE_N1].applied_hash);
+	assert(raft_network_pack(&s.nodes[NODE_N3].network) ==
+	       raft_network_pack(&s.nodes[NODE_N1].network));
+	assert(rec.snapshots == 1 && rec.n == total - rec.snap_index && rec.live == 0);
+
+	/* The next entry is live, not replayed. */
+	deliver_update(&s.nodes[NODE_N1], NODE_N2, total + 1,
+		       (struct raft_event){RAFT_EVENT_CANLINK_DOWN, NODE_N3, 1, 0}, now);
+	raft_agent_poll(&s.nodes[NODE_N1], now);
+	pump(&s, now);
+	assert(s.nodes[NODE_N3].applied_index == total + 1 && rec.live == 1);
+}
+
+static void test_cockpit_error_needs_lost_n1(void)
+{
+	struct sink lk = {0};
+	struct raft_agent leader;
+	struct raft_event err = {RAFT_EVENT_COCKPIT_ERROR, NODE_N1, RAFT_BUS_NONE, 0};
+
+	raft_agent_init(&leader, NODE_N2, sink_send, &lk, 0, 2);
+	leader.role = RAFT_LEADER;
+	leader.leader = NODE_N2;
+	leader.term = 2;
+	raft_client_observe(&leader, (struct raft_event){RAFT_EVENT_NODE_UP, NODE_N1,
+						       RAFT_BUS_NONE, 0}, 0);
+	deliver_update(&leader, NODE_N3, 1, err, 5);
+	assert(lk.last_reply.status == RAFT_CLIENT_REJECTED && leader.last_index == 0);
+	raft_client_observe(&leader, (struct raft_event){RAFT_EVENT_NODE_DOWN, NODE_N1,
+						       RAFT_BUS_NONE, 0}, 10);
+	deliver_update(&leader, NODE_N3, 2, err, 20);
+	assert(leader.last_index == 1 && leader.pending_index == 1);
+}
+
+static void test_forget_drops_report(void)
+{
+	struct sink k = {0};
+	struct raft_agent client;
+	struct raft_event err = {RAFT_EVENT_COCKPIT_ERROR, NODE_N1, RAFT_BUS_NONE, 0};
+
+	raft_agent_init(&client, NODE_N3, sink_send, &k, 0, 3);
+	raft_client_observe(&client, err, 1);
+	raft_agent_poll(&client, 1 + RAFT_REPORT_DOWN_HOLD_MS);
+	assert(client.active_request && client.active_event.type == RAFT_EVENT_COCKPIT_ERROR);
+	raft_client_forget(&client, err);
+	assert(!client.active_request && !client.obs[0].seen);
+	raft_agent_poll(&client, 500);
+	assert(!client.active_request && client.queue_count == 0);
+}
+
+
+/* Checkoff 10: isolating the leader changes the term exactly once; when it
+ * returns it follows the new leader without another election. */
+static void test_isolated_leader_term_changes_once(void)
+{
+	static struct simulation s;
+
+	memset(&s, 0, sizeof(s));
+	for (int node = 0; node < NUM_NODES; node++) {
+		raft_agent_init(&s.nodes[node], (uint8_t)node, send_message, &s, 0,
+				(uint32_t)(node + 11));
+		boot_as_default_leader(&s.nodes[node]);
+		s.active[node] = true;
+	}
+	for (uint32_t t = 5; t <= 200; t += 5) { /* REFs start every follower's timer */
+		for (int n = 0; n < NUM_NODES; n++) {
+			raft_agent_poll(&s.nodes[n], t);
+		}
+		pump(&s, t);
+	}
+	s.active[NODE_N1] = false; /* the leader is cut off from both buses */
+	for (uint32_t t = 205; t <= 2000; t += 5) {
+		for (int n = 0; n < NUM_NODES; n++) {
+			raft_agent_poll(&s.nodes[n], t);
+		}
+		pump(&s, t);
+	}
+	int leader = s.nodes[NODE_N2].role == RAFT_LEADER ? NODE_N2 : NODE_N3;
+
+	assert(s.nodes[leader].role == RAFT_LEADER && s.nodes[leader].term == 2);
+	assert(s.nodes[NODE_N2].term == 2 && s.nodes[NODE_N3].term == 2);
+	assert(s.nodes[NODE_N1].term == 1); /* isolated: no pre-vote majority, no new term */
+	s.active[NODE_N1] = true;
+	for (uint32_t t = 2005; t <= 3000; t += 5) {
+		for (int n = 0; n < NUM_NODES; n++) {
+			raft_agent_poll(&s.nodes[n], t);
+		}
+		pump(&s, t);
+	}
+	for (int n = 0; n < NUM_NODES; n++) {
+		assert(s.nodes[n].term == 2 && s.nodes[n].leader == leader);
+	}
+	assert(s.nodes[NODE_N1].role == RAFT_FOLLOWER);
+}
+
 int main(void)
 {
 	test_commit_stops_at_matching_prefix();
@@ -414,11 +640,17 @@ int main(void)
 	test_committed_reply_holds_graph_repair();
 	test_returning_follower_catches_up();
 	test_isolated_follower_does_not_raise_term();
+	test_boot_listen();
+	test_compaction_and_snapshot_catch_up();
+	test_cockpit_error_needs_lost_n1();
+	test_forget_drops_report();
+	test_isolated_leader_term_changes_once();
 
 	struct simulation s = {0};
 	struct raft_agent early_follower;
 
 	raft_agent_init(&early_follower, NODE_N2, send_message, &s, 0, 77);
+	boot_as_default_leader(&early_follower);
 	raft_agent_poll(&early_follower, 1000);
 	assert(early_follower.term == 1 && early_follower.role == RAFT_FOLLOWER);
 	assert(!early_follower.election_timer_active);
@@ -427,6 +659,7 @@ int main(void)
 		s.active[node] = true;
 		raft_agent_init(&s.nodes[node], (uint8_t)node, send_message, &s,
 				0, (uint32_t)(node + 1));
+		boot_as_default_leader(&s.nodes[node]);
 		assert(s.nodes[node].term == 1 && s.nodes[node].leader == NODE_N1);
 	}
 	assert(s.nodes[NODE_N1].role == RAFT_LEADER);
@@ -471,6 +704,7 @@ int main(void)
 		f.active[node] = true;
 		raft_agent_init(&f.nodes[node], (uint8_t)node, send_message, &f,
 				0, (uint32_t)(100 + node * 17));
+		boot_as_default_leader(&f.nodes[node]);
 	}
 	for (uint32_t t = 0; t <= 200; t += 5) {
 		if (t == 50) {

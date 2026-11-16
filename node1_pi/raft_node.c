@@ -2,10 +2,13 @@
 #include "raft_node.h"
 
 #include <pthread.h>
+#include <stdarg.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "raft_transport.h"
 #include "raft_route.h"
@@ -33,6 +36,29 @@ static pthread_cond_t wake = PTHREAD_COND_INITIALIZER;
 static pthread_t worker;
 static struct raft_work queue[RAFT_QUEUE_DEPTH];
 static unsigned head, count;
+static uint32_t start_ms;
+
+/*
+ * The cockpit's log display. Every committed entry is printed once as it is
+ * applied; entries that arrived already committed (catch-up after an outage)
+ * are marked "(replayed)". raft_seen.log (in the working directory) keeps
+ * what was shown, so after the Pi restarts and rejoins, entries it displayed
+ * before going down are not shown again: the held events appear exactly once,
+ * then live events. A fresh cluster (this node takes term 1 at boot) clears it.
+ */
+#define SEEN_FILE "raft_seen.log"
+struct seen_record {
+	uint32_t term;
+	uint8_t event[4];
+};
+static struct {
+	struct seen_record *rec; /* loaded at start */
+	uint32_t n;              /* records valid in rec[] and in the file */
+	uint32_t skipped;        /* matched entries not shown again */
+	bool diverged;           /* history differs from the file: show everything */
+	bool boot_handled;
+	FILE *f;
+} seen;
 
 static uint32_t monotonic_ms(void)
 {
@@ -40,6 +66,102 @@ static uint32_t monotonic_ms(void)
 
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	return (uint32_t)((uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000);
+}
+
+static double since_start_s(void)
+{
+	return (double)(monotonic_ms() - start_ms) / 1000.0;
+}
+
+/* RAFT_DEBUG: election and append messages. */
+static void debug_line(void *ctx, const char *fmt, ...)
+{
+	char text[160];
+	va_list ap;
+
+	(void)ctx;
+	va_start(ap, fmt);
+	vsnprintf(text, sizeof(text), fmt, ap);
+	va_end(ap);
+	printf("[N1 %.3fs] >> RAFT %s\n", since_start_s(), text);
+}
+
+static void seen_load(void)
+{
+	FILE *in = fopen(SEEN_FILE, "rb");
+	struct seen_record r;
+
+	seen.rec = calloc(RAFT_LOG_CAPACITY, sizeof(*seen.rec));
+	while (in && seen.rec && seen.n < RAFT_LOG_CAPACITY && fread(&r, sizeof(r), 1, in) == 1) {
+		seen.rec[seen.n++] = r;
+	}
+	if (in) {
+		fclose(in);
+	}
+	seen.f = fopen(SEEN_FILE, "ab");
+}
+
+/* Keep only the first n records of the file. */
+static void seen_truncate(uint32_t n)
+{
+	if (seen.f) {
+		fflush(seen.f);
+		if (ftruncate(fileno(seen.f), (off_t)n * (off_t)sizeof(struct seen_record)) != 0) {
+			perror(SEEN_FILE);
+		}
+	}
+	seen.n = n;
+}
+
+static void seen_append(const struct raft_log_entry *e)
+{
+	struct seen_record r = {e->term, {e->event.type, e->event.node, e->event.bus,
+					   e->event.value}};
+
+	if (seen.f && fwrite(&r, sizeof(r), 1, seen.f) == 1) {
+		fflush(seen.f);
+	}
+	if (seen.rec && seen.n < RAFT_LOG_CAPACITY) {
+		seen.rec[seen.n] = r;
+	}
+	seen.n++;
+}
+
+static void on_apply(void *ctx, uint32_t index, const struct raft_log_entry *e, bool replayed,
+		     const struct raft_network *net)
+{
+	char text[96];
+
+	(void)ctx;
+	(void)net;
+	if (!e) {
+		/* Entries before this were compacted: the file can't be matched. */
+		printf("[N1 %.3fs] >> SNAPSHOT through #%u (replayed)\n", since_start_s(), index);
+		seen_truncate(0);
+		seen.diverged = true;
+		return;
+	}
+	struct seen_record r = {e->term, {e->event.type, e->event.node, e->event.bus,
+					   e->event.value}};
+
+	if (!seen.diverged && index <= seen.n && seen.rec && index <= RAFT_LOG_CAPACITY) {
+		if (memcmp(&seen.rec[index - 1], &r, sizeof(r)) == 0) {
+			seen.skipped++; /* shown before this restart */
+			return;
+		}
+		seen.diverged = true; /* a different history from here on */
+		seen_truncate(index - 1);
+	}
+	if (seen.skipped) {
+		printf("[N1 %.3fs] >> (#1-#%u already shown before this restart)\n",
+		       since_start_s(), seen.skipped);
+		seen.skipped = 0;
+	}
+	raft_entry_text(text, sizeof(text), index, e);
+	printf("[N1 %.3fs] >> %s%s\n", since_start_s(), text, replayed ? " (replayed)" : "");
+	if (index > seen.n) {
+		seen_append(e);
+	}
 }
 
 static bool emit_frame(void *ctx, uint32_t id, const uint8_t frame[FRAME_DLC])
@@ -108,6 +230,12 @@ static void *raft_worker(void *arg)
 			raft_client_observe(&agent, work.event, now);
 		}
 		raft_agent_poll(&agent, now);
+		if (agent.boot_led && !seen.boot_handled) {
+			/* Fresh cluster: the history in raft_seen.log is not ours. */
+			seen.boot_handled = true;
+			seen.diverged = true;
+			seen_truncate(0);
+		}
 		atomic_store_explicit(&route_snapshot, raft_route_snapshot(&agent.network),
 			memory_order_relaxed);
 		atomic_store_explicit(&leader_snapshot, (unsigned)((agent.leader + 1) |
@@ -126,9 +254,16 @@ int raft_node_init(pi_raft_emit_fn emit)
 
 	clock_gettime(CLOCK_MONOTONIC, &seed_time);
 	emit_can = emit;
+	start_ms = monotonic_ms();
+	seen_load();
 	raft_agent_init(&agent, NODE_N1, send_body, NULL, monotonic_ms(),
 			(uint32_t)seed_time.tv_nsec ^ (uint32_t)seed_time.tv_sec);
-	if (agent.leader < 0) {
+	agent.debug = debug_line;
+	agent.on_apply = on_apply;
+	if (agent.boot_listen) {
+		printf("Raft N1: listening %u ms for a running cluster before taking term 1"
+		       " (%u entries in %s)\n", (unsigned)RAFT_BOOT_LISTEN_MS, seen.n, SEEN_FILE);
+	} else if (agent.leader < 0) {
 		printf("Raft N1: term %u, leader unknown, role FOLLOWER\n", agent.term);
 	} else {
 		printf("Raft N1: term %u, leader N%d, role %s\n", agent.term,
@@ -183,10 +318,11 @@ void raft_node_leader_snapshot(int *leader, bool *is_leader)
 
 void raft_node_print_status(void)
 {
-	uint32_t term, last_index, commit_index;
-	static struct raft_log_entry log_snapshot[RAFT_WORKING_LOG_ENTRIES];
+	uint32_t term, last_index, commit_index, log_base, log_hash;
+	static struct raft_log_entry tail[RAFT_PRINT_TAIL];
 	static uint32_t printed_last, printed_commit;
 	static bool printed;
+	uint32_t tail_from = 1, tail_n = 0;
 	bool print_log;
 	int leader;
 	enum raft_role role;
@@ -198,16 +334,26 @@ void raft_node_print_status(void)
 	role = agent.role;
 	last_index = agent.last_index;
 	commit_index = agent.commit_index;
+	log_base = agent.log_base;
+	log_hash = agent.applied_hash; /* FNV over every committed entry, compacted ones too */
 	network = agent.network;
 	print_log = !printed || printed_last != last_index || printed_commit != commit_index;
 	if (print_log) {
-		memcpy(log_snapshot, agent.log, last_index * sizeof(log_snapshot[0]));
+		/* Only the most recent entries: the log can hold thousands. */
+		tail_from = last_index > RAFT_PRINT_TAIL ? last_index - RAFT_PRINT_TAIL + 1 : 1;
+		if (tail_from <= log_base) {
+			tail_from = log_base + 1;
+		}
+		for (uint32_t i = tail_from; i <= last_index && tail_n < RAFT_PRINT_TAIL; i++) {
+			if (raft_agent_entry(&agent, i, &tail[tail_n])) {
+				tail_n++;
+			}
+		}
 		printed_last = last_index;
 		printed_commit = commit_index;
 		printed = true;
 	}
 	pthread_mutex_unlock(&lock);
-	uint32_t log_hash = raft_committed_log_hash(log_snapshot, commit_index);
 	if (leader < 0) {
 		printf("  RAFT: leader=? term=%u role=%s | committed=%u total=%u | log=%08x\n", term,
 		       role == RAFT_CANDIDATE ? "CANDIDATE" : "FOLLOWER",
@@ -230,13 +376,18 @@ void raft_node_print_status(void)
 	if (print_log) {
 		printf("  LOG SNAPSHOT: %u entries, committed through #%u\n",
 		       last_index, commit_index);
-		for (uint32_t i = 0; i < last_index; i++) {
-			const struct raft_event *e = &log_snapshot[i].event;
+		if (tail_from > 1) {
+			printf("    (#1-#%u not shown%s)\n", tail_from - 1,
+			       log_base ? ", older ones compacted into the snapshot" : "");
+		}
+		for (uint32_t k = 0; k < tail_n; k++) {
+			uint32_t i = tail_from + k;
+			const struct raft_event *e = &tail[k].event;
 			char bus = e->bus < 2 ? (char)('A' + e->bus) : '-';
 
 			printf("    [%u] term %u %s %s N%u bus %c value %u\n",
-			       i + 1, log_snapshot[i].term,
-			       i < commit_index ? "COMMITTED" : "PENDING",
+			       i, tail[k].term,
+			       i <= commit_index ? "COMMITTED" : "PENDING",
 			       raft_event_name(e->type), (unsigned)e->node + 1,
 			       bus, (unsigned)e->value);
 		}

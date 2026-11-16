@@ -5,3 +5,6 @@ build/
 .DS_Store
 .cache/
 schematic/*.lck
+# Lab 5 Pi runtime/build files
+node1_pi/raft_seen.log
+node1_pi/.build_flags

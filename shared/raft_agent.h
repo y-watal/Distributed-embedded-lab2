@@ -4,8 +4,6 @@
 #include "raft_config.h"
 #include "raft_wire.h"
 
-/* Step 2 working log. Durable 30,000-entry storage is a later lab step. */
-#define RAFT_WORKING_LOG_ENTRIES 64
 #define RAFT_CLIENT_QUEUE_LEN 16
 
 enum raft_role {
@@ -46,6 +44,19 @@ struct raft_observation {
 /* Sends one complete logical body. The platform adapter fragments it for CAN. */
 typedef bool (*raft_send_fn)(void *ctx, uint32_t can_id, const uint8_t *body, uint8_t len);
 
+/* RAFT_DEBUG output (election and append messages), printf-style. */
+typedef void (*raft_debug_fn)(void *ctx, const char *fmt, ...);
+
+/*
+ * Called once per committed entry, in index order, as the state machine
+ * applies it. replayed: the entry was already committed in the cluster when
+ * this node received it (catch-up after an outage), as opposed to live.
+ * entry NULL: a snapshot through `index` replaced the log (`network` is its
+ * state); the entries it covers are not available individually.
+ */
+typedef void (*raft_apply_fn)(void *ctx, uint32_t index, const struct raft_log_entry *entry,
+			      bool replayed, const struct raft_network *network);
+
 struct raft_agent {
 	uint8_t self;
 	int8_t leader;
@@ -64,7 +75,14 @@ struct raft_agent {
 	bool ref_sent;
 	bool empty_append_sent;
 	bool election_timer_active;
-	struct raft_log_entry log[RAFT_WORKING_LOG_ENTRIES];
+	/* Entry i (log_base < i <= last_index) is log[(i - 1) % RAFT_LOG_WINDOW]. */
+	struct raft_log_entry log[RAFT_LOG_WINDOW];
+	uint32_t log_base;             /* last compacted index (0 = none) */
+	uint32_t base_term;            /* term of entry log_base */
+	struct raft_network base_network; /* state after entry log_base */
+	uint32_t base_hash;            /* committed-log hash through log_base */
+	uint32_t applied_hash;         /* committed-log hash through applied_index */
+	uint32_t replay_boundary;      /* entries up to here arrived already committed */
 	struct raft_network network;
 	struct raft_event queued[RAFT_CLIENT_QUEUE_LEN];
 	uint8_t queue_head, queue_count;
@@ -86,8 +104,16 @@ struct raft_agent {
 	uint8_t votes; /* bit per node */
 	uint8_t pre_votes; /* tentative votes, never change the current term */
 	bool pre_vote_active;
+	bool boot_listen;              /* default leader, listening before term 1 */
+	bool boot_led;                 /* took default leadership at boot (fresh cluster) */
+	uint32_t boot_listen_until_ms;
+	bool wait_cluster;             /* random mode: no election before every node is heard */
 	raft_send_fn send;
 	void *send_ctx;
+	raft_debug_fn debug;
+	void *debug_ctx;
+	raft_apply_fn on_apply;
+	void *apply_ctx;
 };
 
 /* Starts with the configured leader, or schedules a randomized boot election. */
@@ -124,5 +150,20 @@ void raft_client_get_network(const struct raft_agent *a, struct raft_network *ou
 
 /* Election entry point, also used by the missed-heartbeat timer. */
 void raft_agent_start_election(struct raft_agent *a);
+
+/* Copy entry `index` if it is still in RAM (log_base < index <= last_index). */
+bool raft_agent_entry(const struct raft_agent *a, uint32_t index, struct raft_log_entry *out);
+
+/* Drop a local observation without reporting it (e.g. the cockpit is back
+ * and will report its own state). Clears any queued or active report too. */
+void raft_client_forget(struct raft_agent *a, struct raft_event event);
+
+/* FNV-1a over one entry: term bytes, then the four event bytes. */
+uint32_t raft_hash_entry(uint32_t hash, const struct raft_log_entry *e);
+#define RAFT_HASH_INIT 2166136261u
+
+/* Network state <-> 20 bits for snapshots. */
+uint32_t raft_network_pack(const struct raft_network *n);
+void raft_network_unpack(uint32_t bits, struct raft_network *n);
 
 #endif /* SHARED_RAFT_AGENT_H */

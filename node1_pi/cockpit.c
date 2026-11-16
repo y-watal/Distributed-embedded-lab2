@@ -512,9 +512,13 @@ static void wheel_logic(int32_t steer, bool b4, bool b5, bool b10, uint64_t now)
 			test_fault = true;
 			test_fault_ns = now;
 			exit_pending = false;
+			raft_node_report_event((struct raft_event){RAFT_EVENT_APPLICATION, NODE_N1,
+				RAFT_BUS_NONE, RAFT_APP_TEST_FAULT_ON}); /* Lab 5 EVENT */
 		} else if (exit_pending && now - first_exit_ns <= DOUBLE_PRESS_NS) {
 			test_fault = false;
 			exit_pending = false;
+			raft_node_report_event((struct raft_event){RAFT_EVENT_APPLICATION, NODE_N1,
+				RAFT_BUS_NONE, RAFT_APP_TEST_FAULT_OFF});
 		} else {
 			first_exit_ns = now;
 			exit_pending = true;

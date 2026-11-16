@@ -3,26 +3,41 @@
 
 #include "raft_agent.h"
 
-/* Compare committed entries across consoles without hashing struct padding
- * or including an uncommitted suffix that may legitimately differ. */
-static inline uint32_t raft_committed_log_hash(const struct raft_log_entry *log,
-						 uint32_t commit_index)
+/* Zephyr builds define RAFT_SNPRINTF as snprintk (cbprintf, small stack). */
+#ifndef RAFT_SNPRINTF
+#include <stdio.h>
+#define RAFT_SNPRINTF snprintf
+#endif
+
+/* Committed entries printed with the log summary (the most recent ones). */
+#define RAFT_PRINT_TAIL 16
+
+/*
+ * One committed entry as the checkoff names it: MEMBER (node and link
+ * changes), EVENT (application events), COCKPIT (enter or leave failure mode).
+ */
+static inline int raft_entry_text(char *buf, size_t n, uint32_t index,
+				  const struct raft_log_entry *e)
 {
-	uint32_t hash = 2166136261u;
+	const struct raft_event *v = &e->event;
 
-	for (uint32_t i = 0; i < commit_index; i++) {
-		uint32_t term = log[i].term;
-		const uint8_t event[] = {log[i].event.type, log[i].event.node,
-			log[i].event.bus, log[i].event.value};
-
-		for (int byte = 0; byte < 4; byte++) {
-			hash = (hash ^ (uint8_t)(term >> (8 * byte))) * 16777619u;
-		}
-		for (int byte = 0; byte < 4; byte++) {
-			hash = (hash ^ event[byte]) * 16777619u;
-		}
+	if (v->type == RAFT_EVENT_APPLICATION) {
+		return RAFT_SNPRINTF(buf, n, "EVENT #%u term %u N%u %s", (unsigned)index,
+				(unsigned)e->term, (unsigned)v->node + 1u,
+				v->value == RAFT_APP_TEST_FAULT_ON ? "test fault on" :
+				v->value == RAFT_APP_TEST_FAULT_OFF ? "test fault off" : "event");
 	}
-	return hash;
+	if (v->type == RAFT_EVENT_COCKPIT_OK || v->type == RAFT_EVENT_COCKPIT_ERROR) {
+		return RAFT_SNPRINTF(buf, n, "COCKPIT #%u term %u %s", (unsigned)index,
+				(unsigned)e->term, raft_event_name(v->type));
+	}
+	if (v->bus < 2) {
+		return RAFT_SNPRINTF(buf, n, "MEMBER #%u term %u %s N%u bus %c", (unsigned)index,
+				(unsigned)e->term, raft_event_name(v->type),
+				(unsigned)v->node + 1u, 'A' + v->bus);
+	}
+	return RAFT_SNPRINTF(buf, n, "MEMBER #%u term %u %s N%u", (unsigned)index,
+			(unsigned)e->term, raft_event_name(v->type), (unsigned)v->node + 1u);
 }
 
 static inline const char *raft_state_text(bool known, bool up)

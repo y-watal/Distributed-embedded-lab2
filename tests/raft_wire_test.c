@@ -90,6 +90,19 @@ static void test_append_and_fragments(void)
 	assert(len == RAFT_APPEND_EMPTY_LEN);
 	assert(raft_fragment_count(len) == 4);
 	assert(raft_append_decode(body, len, &out) && out.entry_count == 0);
+
+	/* Snapshot: same length as one entry, told apart by entry_count. */
+	struct raft_append snap = empty;
+	snap.entry_count = RAFT_SNAPSHOT_MARK;
+	snap.snapshot_network = 0x000ABCDEu;
+	snap.snapshot_hash = 0xDEADBEEFu;
+	len = raft_append_encode(&snap, body);
+	assert(len == RAFT_APPEND_SNAPSHOT_LEN);
+	assert(raft_append_decode(body, len, &out) && out.entry_count == RAFT_SNAPSHOT_MARK);
+	assert(out.snapshot_network == 0x000ABCDEu && out.snapshot_hash == 0xDEADBEEFu &&
+	       out.prev_index == snap.prev_index);
+	body[17] = 2; /* neither 0, 1 nor the snapshot mark */
+	assert(!raft_append_decode(body, len, &out));
 }
 
 static void test_ack_and_client(void)

@@ -40,6 +40,10 @@ static inline const char *raft_event_name(uint8_t type)
 	}
 }
 
+/* APPLICATION event values (Lab 5 "EVENT" entries). node = originating node. */
+#define RAFT_APP_TEST_FAULT_ON  1 /* test button: local fault engaged */
+#define RAFT_APP_TEST_FAULT_OFF 2 /* test button: double press, recovered */
+
 struct raft_event {
 	uint8_t type;
 	uint8_t node;  /* NODE_N1..NODE_N3, or event source */
@@ -66,16 +70,25 @@ struct raft_vote_reply {
 	uint8_t granted;   /* 0 or 1 */
 };
 
-/* APPEND carries zero or one entry. Entry index is prev_index + 1. */
+/*
+ * APPEND carries zero or one entry. Entry index is prev_index + 1.
+ * entry_count RAFT_SNAPSHOT_MARK makes it a snapshot instead (InstallSnapshot):
+ * prev_index / prev_term are the last index and term the snapshot covers, and
+ * the body carries the network state and committed-log hash at that index.
+ * The leader sends one when a follower needs an entry it has compacted away.
+ */
+#define RAFT_SNAPSHOT_MARK 0xffu
 struct raft_append {
 	uint8_t target; /* NODE_N1..NODE_N3, or RAFT_TARGET_ALL */
 	uint32_t term;
 	uint32_t prev_index;
 	uint32_t prev_term;
 	uint32_t leader_commit;
-	uint8_t entry_count; /* 0 or 1 */
+	uint8_t entry_count; /* 0, 1, or RAFT_SNAPSHOT_MARK */
 	uint32_t entry_term;
 	struct raft_event entry;
+	uint32_t snapshot_network; /* raft_network_pack() */
+	uint32_t snapshot_hash;    /* committed-log hash through prev_index */
 };
 
 struct raft_append_ack {
@@ -109,6 +122,7 @@ struct raft_client_reply {
 #define RAFT_VOTE_REPLY_LEN    6u
 #define RAFT_APPEND_EMPTY_LEN 18u
 #define RAFT_APPEND_ENTRY_LEN 26u
+#define RAFT_APPEND_SNAPSHOT_LEN 26u /* same length; entry_count tells them apart */
 #define RAFT_APPEND_ACK_LEN   10u
 #define RAFT_CLIENT_UPDATE_LEN 9u
 #define RAFT_CLIENT_REPLY_LEN 11u
@@ -204,7 +218,7 @@ static inline void raft_vote_reply_decode(const uint8_t in[RAFT_VOTE_REPLY_LEN],
 static inline uint8_t raft_append_encode(const struct raft_append *m,
 					 uint8_t out[RAFT_APPEND_ENTRY_LEN])
 {
-	if (m->entry_count > 1) {
+	if (m->entry_count > 1 && m->entry_count != RAFT_SNAPSHOT_MARK) {
 		return 0;
 	}
 	out[0] = m->target;
@@ -213,6 +227,11 @@ static inline uint8_t raft_append_encode(const struct raft_append *m,
 	raft_put_u32(out + 9, m->prev_term);
 	raft_put_u32(out + 13, m->leader_commit);
 	out[17] = m->entry_count;
+	if (m->entry_count == RAFT_SNAPSHOT_MARK) {
+		raft_put_u32(out + 18, m->snapshot_network);
+		raft_put_u32(out + 22, m->snapshot_hash);
+		return RAFT_APPEND_SNAPSHOT_LEN;
+	}
 	if (m->entry_count == 1) {
 		raft_put_u32(out + 18, m->entry_term);
 		raft_event_encode(&m->entry, out + 22);
@@ -225,7 +244,9 @@ static inline bool raft_append_decode(const uint8_t *in, uint8_t len, struct raf
 {
 	if ((len != RAFT_APPEND_EMPTY_LEN && len != RAFT_APPEND_ENTRY_LEN) ||
 	    (in[17] == 0 && len != RAFT_APPEND_EMPTY_LEN) ||
-	    (in[17] == 1 && len != RAFT_APPEND_ENTRY_LEN) || in[17] > 1) {
+	    (in[17] == 1 && len != RAFT_APPEND_ENTRY_LEN) ||
+	    (in[17] == RAFT_SNAPSHOT_MARK && len != RAFT_APPEND_SNAPSHOT_LEN) ||
+	    (in[17] > 1 && in[17] != RAFT_SNAPSHOT_MARK)) {
 		return false;
 	}
 	m->target = in[0];
@@ -236,7 +257,12 @@ static inline bool raft_append_decode(const uint8_t *in, uint8_t len, struct raf
 	m->entry_count = in[17];
 	m->entry_term = 0;
 	m->entry = (struct raft_event){0};
-	if (m->entry_count == 1) {
+	m->snapshot_network = 0;
+	m->snapshot_hash = 0;
+	if (m->entry_count == RAFT_SNAPSHOT_MARK) {
+		m->snapshot_network = raft_get_u32(in + 18);
+		m->snapshot_hash = raft_get_u32(in + 22);
+	} else if (m->entry_count == 1) {
 		m->entry_term = raft_get_u32(in + 18);
 		raft_event_decode(in + 22, &m->entry);
 	}

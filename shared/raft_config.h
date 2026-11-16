@@ -13,8 +13,37 @@
 #define RAFT_EMPTY_APPEND_MS           100
 #define RAFT_MISSED_HEARTBEATS         3
 #define RAFT_ELECTION_JITTER_MS        39 /* random inclusive range: 0..39 ms */
-#define RAFT_LOG_CAPACITY              30000
-#define RAFT_DEBUG                     1
+#define RAFT_LOG_CAPACITY              30000 /* log_size: lifetime entries before updates are refused */
+/*
+ * Entries kept in RAM. Older committed entries are compacted into a snapshot
+ * (network state + log hash at that index); a follower that needs one gets
+ * the snapshot instead (APPEND with RAFT_SNAPSHOT_MARK). 256 x 8 bytes fits
+ * the STM32s; 30,000 entries would not fit in their 96 KB of RAM.
+ */
+#define RAFT_LOG_WINDOW                256
+#ifndef RAFT_DEBUG
+#define RAFT_DEBUG                     1 /* Debug: print election and append messages */
+#endif
+/*
+ * The default leader listens this long before taking term 1. If it hears a
+ * running cluster (REF or APPEND from another node), it joins as a follower
+ * instead: that is the Pi coming back after an STM32 took over. Longer than
+ * the 100 ms empty-APPEND period, so a running leader is always heard.
+ */
+#define RAFT_BOOT_LISTEN_MS            250
+/*
+ * Random-leader mode (RAFT_DEFAULT_LEADER -1): the boot election timer starts
+ * once this node has heard every other node, so boot-time differences (the
+ * Pi takes ~30 s) don't decide the winner. RAFT_ELECTION_SEED 0 draws a
+ * hardware-random timeout; any other value makes every node's timeouts
+ * reproducible, and RAFT_SEED_PI_WINS gives the cockpit the shortest one.
+ */
+#ifndef RAFT_ELECTION_SEED
+#define RAFT_ELECTION_SEED             0
+#endif
+/* With this seed the first boot timeouts are N1 60 ms, N2 95 ms, N3 95 ms
+ * (tests/raft_random_test.c checks it). Build with SEED=408 to use it. */
+#define RAFT_SEED_PI_WINS              408u
 
 /*
  * Raft client pacing. Lab 3 DEG and peer-lost detection stay fast for local

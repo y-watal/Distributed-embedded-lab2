@@ -8,7 +8,7 @@
 #include "node_config.h"
 
 #define EVLOG_TEXT  80
-#define EVLOG_DEPTH 16
+#define EVLOG_DEPTH 32 /* Lab 5: Raft entry and debug lines arrive in bursts */
 
 struct evlog_item {
 	uint32_t ms;

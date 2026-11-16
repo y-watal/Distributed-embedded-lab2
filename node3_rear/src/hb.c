@@ -164,6 +164,19 @@ static void hb_mon_thread(void *p1, void *p2, void *p3)
 					raft_node_report_event((struct raft_event){
 						alive ? RAFT_EVENT_NODE_UP : RAFT_EVENT_NODE_DOWN,
 						(uint8_t)node, RAFT_BUS_NONE, 0});
+					if (node == NODE_N1) {
+						/* Part 3: the leader logs COCKPIT_ERROR when the
+						 * cockpit's heartbeats stop. When they resume, the
+						 * cockpit reports its own state (OK, or ERROR with
+						 * the proxy stopped), so ours is dropped. */
+						struct raft_event ce = {RAFT_EVENT_COCKPIT_ERROR,
+							NODE_N1, RAFT_BUS_NONE, 0};
+						if (alive) {
+							raft_node_forget_event(ce);
+						} else {
+							raft_node_report_event(ce);
+						}
+					}
 					prev_alive[node] = alive;
 				}
 			}

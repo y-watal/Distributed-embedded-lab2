@@ -186,6 +186,7 @@ number, independent of the configured 30,000-entry storage capacity.
 | `VOTE_REPLY` | 6 | term `u32`, candidate node `u8`, granted `u8` (0 or 1) |
 | Empty `APPEND` | 18 | target node `u8`, term `u32`, previous index `u32`, previous term `u32`, leader commit index `u32`, entry count `u8` = 0 |
 | One-entry `APPEND` | 26 | the same 18 bytes with entry count = 1, then entry term `u32` and event `4 bytes` |
+| Snapshot `APPEND` | 26 | the same 18 bytes with entry count = `0xFF`; previous index/term = the last index/term the snapshot covers; then network state `u32` (20 bits) and committed-log hash `u32` |
 | `APPEND_ACK` | 10 | term `u32`, match index or retry index `u32`, target leader `u8`, success `u8` (0 or 1) |
 | `CLIENT_UPDATE` | 9 | target leader `u8`, client request ID `u32`, event `4 bytes` |
 | `CLIENT_REPLY` | 11 | target client `u8`, request ID `u32`, status `u8`, leader hint `u8`, committed index `u32` |
@@ -210,6 +211,61 @@ Each event is four bytes: `type`, `node`, `bus`, `value`. The defined types are
 `CANLINK_DOWN`, and `APPLICATION`. Node is 0–2. Bus is 0 for A, 1 for B,
 or `0xFF` when the event is not about a link. Value is zero except for an
 application event code. For `APPLICATION`, node is the originating node.
+
+## Startup, log storage and the log display
+
+**Default startup.** The configured leader (the cockpit) listens for
+`RAFT_BOOT_LISTEN_MS` (250 ms) before taking term 1. If it hears another
+node's `REF` or `APPEND`, a cluster is already running, so it joins that
+leader as a follower. This is the Pi coming back after an STM32 took over
+(checkoff 7), and LEADER stays on the STM32. The other nodes boot as
+followers of the cockpit in term 1 and start their election timers at its
+first `REF`, as before.
+
+**Random leader** (`LEADER=random`; Pi: `make LEADER=random`, STM32:
+`west build ... -- -DLEADER=random`). Every node starts with no leader. The
+boot election timer starts only once the node has heard every other node,
+so the Pi's ~30 s boot doesn't decide the winner. `SEED=<n>` makes each
+node's timeouts reproducible. `SEED=408` (`RAFT_SEED_PI_WINS`) gives the
+cockpit a 60 ms first timeout against 95 ms on both STM32s, so the Pi wins
+(checkoff 8). After that, elections follow missed `REF`s as in default mode.
+
+**Log storage.** `log_size` is `RAFT_LOG_CAPACITY` = 30,000 lifetime
+entries; beyond that the leader answers `REJECTED`. Each node keeps the
+newest `RAFT_LOG_WINDOW` (256) entries in RAM; 30,000 entries of 8 bytes
+would not fit in the STM32's 96 KB. Older applied entries are folded into a
+snapshot: the network state, the last index and term, and the running FNV
+hash of every committed entry. If a follower needs an entry the leader has
+compacted, the leader sends a snapshot `APPEND`, then the entries still in
+RAM. The `log=` hash on the `RAFT:` line covers every committed entry,
+compacted ones included, so it still compares across nodes.
+
+**COCKPIT_ERROR / COCKPIT_OK.** The Pi reports its own state: OK while
+wheel data arrives, ERROR without it or with its test fault. When an STM32
+stops hearing N1's heartbeat it reports `COCKPIT_ERROR` (with `NODE_DOWN
+N1`), so the new leader logs the failure mode. The leader accepts it only if
+it has lost N1 too. When N1's heartbeat returns, the STM32 drops its report
+and the cockpit's own report decides.
+
+**EVENT entries.** The test button on any node logs an `APPLICATION` entry
+from that node: value 1 when the test fault engages, 2 when a double press
+clears it. During the hop, pressing N2's test button sends N2's EVENT to the
+Pi and on to N3's log through the relay (checkoff 5).
+
+**Log display.** Every node prints each committed entry once, as it is
+applied: `MEMBER #n term t NODE_/CANLINK_...`, `EVENT #n ...` or `COCKPIT #n
+...`. Entries that were already committed when the node received them
+(catch-up after an outage) are marked `(replayed)`. The Pi records what it
+has shown in `raft_seen.log` in its working directory. After a restart it
+does not repeat entries it showed before going down: the held events appear
+once, marked replayed, then live events (checkoff 7). A fresh cluster, where
+the Pi takes term 1 at boot, clears the file. The status block prints only
+the newest 16 entries (`RAFT_PRINT_TAIL`).
+
+**Debug.** With `RAFT_DEBUG` (the handout's `Debug` key, default on), every
+node prints `RAFT ...` event lines: pre-votes, vote requests and replies,
+leadership, each entry the leader appends and sends, each entry a follower
+stores, commits, and snapshots. Empty APPENDs and REF are not printed.
 
 ## Client pacing
 

@@ -1,23 +1,26 @@
 #include "raft_node.h"
 
+#include <stdarg.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/printk.h>
 #include <string.h>
 
 #include "canbus.h"
+#include "evlog.h"
 #include "node_config.h"
 #include "raft_transport.h"
 #include "raft_route.h"
+#define RAFT_SNPRINTF snprintk
 #include "raft_status.h"
 #include "gtime.h"
 #include "tp.h"
 
-#define RAFT_STACK_SIZE 3072
+#define RAFT_STACK_SIZE 4096 /* Lab 5: entry and debug lines are formatted here */
 #define RAFT_QUEUE_DEPTH 32
 #define PRIO_RAFT 9 /* below CTRL, relay, and HB_TX */
 
 struct raft_work {
-	uint8_t kind; /* 0 = CAN frame, 1 = local client event */
+	uint8_t kind; /* 0 = CAN frame, 1 = local client event, 2 = forget an observation */
 	struct can_frame frame;
 	struct raft_event event;
 };
@@ -65,6 +68,8 @@ static void raft_thread(void *p1, void *p2, void *p3)
 			raft_agent_receive(&agent, work.frame.id, body, len, now);
 		} else if (got == 0 && work.kind == 1) {
 			raft_client_observe(&agent, work.event, now);
+		} else if (got == 0 && work.kind == 2) {
+			raft_client_forget(&agent, work.event);
 		}
 		raft_agent_poll(&agent, now);
 		atomic_set(&route_snapshot, (atomic_val_t)raft_route_snapshot(&agent.network));
@@ -77,10 +82,41 @@ static void raft_thread(void *p1, void *p2, void *p3)
 	}
 }
 
+/* RAFT_DEBUG: election and append messages, as event lines (never blocks). */
+static void debug_line(void *ctx, const char *fmt, ...)
+{
+	char text[72];
+	va_list ap;
+
+	ARG_UNUSED(ctx);
+	va_start(ap, fmt);
+	vsnprintk(text, sizeof(text), fmt, ap);
+	va_end(ap);
+	evlog("RAFT %s", text);
+}
+
+/* Each committed entry once, as it is applied: the node's log display. */
+static void on_apply(void *ctx, uint32_t index, const struct raft_log_entry *e, bool replayed,
+		     const struct raft_network *net)
+{
+	char text[64];
+
+	ARG_UNUSED(ctx);
+	ARG_UNUSED(net);
+	if (!e) {
+		evlog("SNAPSHOT through #%u (replayed)", index);
+		return;
+	}
+	raft_entry_text(text, sizeof(text), index, e);
+	evlog("%s%s", text, replayed ? " (replayed)" : "");
+}
+
 int raft_node_init(void)
 {
 	raft_agent_init(&agent, NODE_SELF, send_body, NULL, k_uptime_get_32(),
 			k_cycle_get_32() ^ (0x9e3779b9u * (NODE_SELF + 1u)));
+	agent.debug = debug_line;
+	agent.on_apply = on_apply;
 	if (agent.leader < 0) {
 		printk("Raft N%d: term %u, leader unknown, role follower\n",
 		       NODE_SELF + 1, agent.term);
@@ -113,6 +149,13 @@ bool raft_node_report_event(struct raft_event event)
 	return k_msgq_put(&raft_q, &work, K_NO_WAIT) == 0;
 }
 
+bool raft_node_forget_event(struct raft_event event)
+{
+	struct raft_work work = {.kind = 2, .event = event};
+
+	return k_msgq_put(&raft_q, &work, K_NO_WAIT) == 0;
+}
+
 void raft_node_get_network(struct raft_network *out)
 {
 	k_mutex_lock(&raft_lock, K_FOREVER);
@@ -135,10 +178,11 @@ void raft_node_leader_snapshot(int *leader, bool *is_leader)
 
 void raft_node_print_status(void)
 {
-	uint32_t term, last_index, commit_index;
-	static struct raft_log_entry log_snapshot[RAFT_WORKING_LOG_ENTRIES];
+	uint32_t term, last_index, commit_index, log_base, log_hash;
+	static struct raft_log_entry tail[RAFT_PRINT_TAIL];
 	static uint32_t printed_last, printed_commit;
 	static bool printed;
+	uint32_t tail_from = 1, tail_n = 0;
 	bool print_log;
 	int leader;
 	enum raft_role role;
@@ -150,16 +194,26 @@ void raft_node_print_status(void)
 	role = agent.role;
 	last_index = agent.last_index;
 	commit_index = agent.commit_index;
+	log_base = agent.log_base;
+	log_hash = agent.applied_hash; /* FNV over every committed entry, compacted ones too */
 	network = agent.network;
 	print_log = !printed || printed_last != last_index || printed_commit != commit_index;
 	if (print_log) {
-		memcpy(log_snapshot, agent.log, last_index * sizeof(log_snapshot[0]));
+		/* Only the most recent entries: the log can hold thousands. */
+		tail_from = last_index > RAFT_PRINT_TAIL ? last_index - RAFT_PRINT_TAIL + 1 : 1;
+		if (tail_from <= log_base) {
+			tail_from = log_base + 1;
+		}
+		for (uint32_t i = tail_from; i <= last_index && tail_n < RAFT_PRINT_TAIL; i++) {
+			if (raft_agent_entry(&agent, i, &tail[tail_n])) {
+				tail_n++;
+			}
+		}
 		printed_last = last_index;
 		printed_commit = commit_index;
 		printed = true;
 	}
 	k_mutex_unlock(&raft_lock);
-	uint32_t log_hash = raft_committed_log_hash(log_snapshot, commit_index);
 	if (leader < 0) {
 		printk("  RAFT: leader=? term=%u role=%s | committed=%u total=%u | log=%08x\n", term,
 		       role == RAFT_CANDIDATE ? "CANDIDATE" : "FOLLOWER",
@@ -182,13 +236,18 @@ void raft_node_print_status(void)
 	if (print_log) {
 		printk("  LOG SNAPSHOT: %u entries, committed through #%u\n",
 		       last_index, commit_index);
-		for (uint32_t i = 0; i < last_index; i++) {
-			const struct raft_event *e = &log_snapshot[i].event;
+		if (tail_from > 1) {
+			printk("    (#1-#%u not shown%s)\n", tail_from - 1,
+			       log_base ? ", older ones compacted into the snapshot" : "");
+		}
+		for (uint32_t k = 0; k < tail_n; k++) {
+			uint32_t i = tail_from + k;
+			const struct raft_event *e = &tail[k].event;
 			char bus = e->bus < 2 ? (char)('A' + e->bus) : '-';
 
 			printk("    [%u] term %u %s %s N%u bus %c value %u\n",
-			       i + 1, log_snapshot[i].term,
-			       i < commit_index ? "COMMITTED" : "PENDING",
+			       i, tail[k].term,
+			       i <= commit_index ? "COMMITTED" : "PENDING",
 			       raft_event_name(e->type), (unsigned)e->node + 1,
 			       bus, (unsigned)e->value);
 		}

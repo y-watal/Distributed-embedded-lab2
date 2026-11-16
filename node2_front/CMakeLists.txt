@@ -5,6 +5,17 @@ project(node2_front)
 
 target_include_directories(app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../shared)
 
+# Lab 5 startup mode, same on all three nodes (CMake caches these: pass
+# -DLEADER=cockpit -DSEED= to go back):
+#   west build ... -- -DLEADER=random            election at boot
+#   west build ... -- -DLEADER=random -DSEED=408  reproducible; the Pi wins
+if(DEFINED LEADER AND LEADER STREQUAL "random")
+  target_compile_definitions(app PRIVATE RAFT_DEFAULT_LEADER=-1)
+endif()
+if(DEFINED SEED AND NOT SEED STREQUAL "")
+  target_compile_definitions(app PRIVATE RAFT_ELECTION_SEED=${SEED}u)
+endif()
+
 target_sources(app PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../shared/raft_agent.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../shared/raft_transport.c

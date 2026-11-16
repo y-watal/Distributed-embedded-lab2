@@ -51,6 +51,35 @@ bus showed afterwards. Wire formats and rules are in
 - **Pending:** blinkers driven from global time, and calibrating
   `TIMESYNC_REF_DELAY_US` against the scope.
 
+### Rest of the lab: rejoin, replay, snapshots, random leader, events, debug
+- **Pi back (checkoff 7):** the default leader listens 250 ms before taking
+  term 1, and joins a running cluster as a follower instead. Each node prints
+  every committed entry once, marked `(replayed)` if it arrived already
+  committed. The Pi's `raft_seen.log` stops entries shown before a restart
+  from appearing again.
+- **Log size:** a 256-entry RAM window with snapshot compaction and
+  InstallSnapshot (an APPEND with entry count 0xFF, no new CAN ID) replaces
+  the 64-entry log that rejected everything once full. `log_size` = 30,000
+  lifetime entries. `log=` is now a running hash, so it still covers
+  compacted entries.
+- **COCKPIT_ERROR on cockpit loss:** STM32 clients report it with `NODE_DOWN
+  N1`. The leader accepts it only if it has lost N1 too, and the STM32 drops
+  its report when N1 returns.
+- **EVENT entries:** the test button logs `APPLICATION` (1 = test fault on,
+  2 = off) from the node that was pressed (checkoff 5).
+- **Debug:** `RAFT_DEBUG` prints election and append messages as `RAFT ...`
+  event lines.
+- **Random leader (checkoff 8):** `LEADER=random` and `SEED=` build options
+  for the Pi Makefile and the STM32 CMake. The boot election waits until
+  every node is heard; `SEED=408` makes the cockpit win.
+- **Tests:** `make -C tests` runs everything. New: boot listen (fresh and
+  rejoin), 296 entries through the 256-entry window with snapshot catch-up
+  and replay flags, cockpit-error acceptance, `raft_client_forget()`, an
+  isolated leader changing the term exactly once, the snapshot codec, and
+  `raft_random_test.c` (seed 408: N1 wins term 1).
+- **Unverified:** none of this has run on hardware, and the STM32 code is only
+  stub-compiled.
+
 ### Response-time statistics commented out
 - **STM32s:** `WCET_MEASURE` and `JITTER_MEASURE` are 0 in `lab3_config.h`
   (the old `1` lines are left commented), so every probe compiles away. The

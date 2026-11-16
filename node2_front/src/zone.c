@@ -10,6 +10,7 @@
 #include "lab3_config.h"
 #include "node_config.h"
 #include "jitter.h"
+#include "raft_node.h"
 #include "tp.h"
 
 static struct k_spinlock lock; /* everything below */
@@ -239,6 +240,7 @@ void zone_test_button(uint32_t press_cyc)
 {
 	uint32_t now = k_uptime_get_32();
 	k_spinlock_key_t key = k_spin_lock(&lock);
+	bool was = test_fault;
 
 	if (!test_fault) {
 		test_fault = true; /* single press: local fail */
@@ -251,10 +253,16 @@ void zone_test_button(uint32_t press_cyc)
 		first_exit_ms = now;
 		exit_pending = true;
 	}
+	bool engaged = test_fault;
 	k_spin_unlock(&lock, key);
 
 	zone_update(); /* act now, not at the next HB_MON tick */
 	ctrl_kick();   /* and wake the actuator task (R2.5: local fail within 10 ms) */
+	if (engaged != was) {
+		/* Lab 5: an EVENT in the replicated log (checkoff 5: N2's reaches N3). */
+		raft_node_report_event((struct raft_event){RAFT_EVENT_APPLICATION, NODE_SELF,
+			RAFT_BUS_NONE, engaged ? RAFT_APP_TEST_FAULT_ON : RAFT_APP_TEST_FAULT_OFF});
+	}
 }
 
 void zone_note_fault(enum fault_code code)

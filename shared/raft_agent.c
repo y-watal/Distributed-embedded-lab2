@@ -7,6 +7,96 @@ static bool send_body(struct raft_agent *a, uint32_t id, const uint8_t *body, ui
 	return a->send && a->send(a->send_ctx, id, body, len);
 }
 
+/* RAFT_DEBUG: election and append messages (handout config key "Debug"). */
+#define DBG(a, ...)                                                       \
+	do {                                                              \
+		if (RAFT_DEBUG && (a)->debug) {                           \
+			(a)->debug((a)->debug_ctx, __VA_ARGS__);          \
+		}                                                         \
+	} while (0)
+
+uint32_t raft_hash_entry(uint32_t hash, const struct raft_log_entry *e)
+{
+	const uint8_t event[] = {e->event.type, e->event.node, e->event.bus, e->event.value};
+
+	for (int byte = 0; byte < 4; byte++) {
+		hash = (hash ^ (uint8_t)(e->term >> (8 * byte))) * 16777619u;
+	}
+	for (int byte = 0; byte < 4; byte++) {
+		hash = (hash ^ event[byte]) * 16777619u;
+	}
+	return hash;
+}
+
+uint32_t raft_network_pack(const struct raft_network *n)
+{
+	uint32_t bits = 0;
+
+	for (int node = 0; node < NUM_NODES; node++) {
+		bits |= (uint32_t)n->node_up[node] << node;
+		bits |= (uint32_t)n->node_known[node] << (3 + node);
+		for (int bus = 0; bus < 2; bus++) {
+			bits |= (uint32_t)n->link_up[node][bus] << (6 + node * 2 + bus);
+			bits |= (uint32_t)n->link_known[node][bus] << (12 + node * 2 + bus);
+		}
+	}
+	bits |= (uint32_t)n->cockpit_ok << 18;
+	bits |= (uint32_t)n->cockpit_known << 19;
+	return bits;
+}
+
+void raft_network_unpack(uint32_t bits, struct raft_network *n)
+{
+	for (int node = 0; node < NUM_NODES; node++) {
+		n->node_up[node] = (bits >> node) & 1u;
+		n->node_known[node] = (bits >> (3 + node)) & 1u;
+		for (int bus = 0; bus < 2; bus++) {
+			n->link_up[node][bus] = (bits >> (6 + node * 2 + bus)) & 1u;
+			n->link_known[node][bus] = (bits >> (12 + node * 2 + bus)) & 1u;
+		}
+	}
+	n->cockpit_ok = (bits >> 18) & 1u;
+	n->cockpit_known = (bits >> 19) & 1u;
+}
+
+/* Entry `index`, which must be in RAM (log_base < index <= last_index). */
+static struct raft_log_entry *entry_at(struct raft_agent *a, uint32_t index)
+{
+	return &a->log[(index - 1u) % RAFT_LOG_WINDOW];
+}
+
+/* Term of entry `index`; 0 for index 0. Compacted entries before log_base are
+ * committed, and only matched through prev_matches(). */
+static uint32_t term_at(const struct raft_agent *a, uint32_t index)
+{
+	if (index == 0 || index < a->log_base) {
+		return 0;
+	}
+	if (index == a->log_base) {
+		return a->base_term;
+	}
+	return a->log[(index - 1u) % RAFT_LOG_WINDOW].term;
+}
+
+/* Does our log hold entry `index` with term `term`? Compacted entries are
+ * committed, and committed entries match the leader's by the Raft rules. */
+static bool prev_matches(const struct raft_agent *a, uint32_t index, uint32_t term)
+{
+	if (index == 0 || index < a->log_base) {
+		return true;
+	}
+	return index <= a->last_index && term_at(a, index) == term;
+}
+
+bool raft_agent_entry(const struct raft_agent *a, uint32_t index, struct raft_log_entry *out)
+{
+	if (index <= a->log_base || index > a->last_index) {
+		return false;
+	}
+	*out = a->log[(index - 1u) % RAFT_LOG_WINDOW];
+	return true;
+}
+
 static void apply_event(struct raft_network *n, const struct raft_event *e)
 {
 	if (e->type == RAFT_EVENT_COCKPIT_OK) {
@@ -96,11 +186,42 @@ static struct raft_event subject_event(int subject, bool up)
 
 static void apply_committed(struct raft_agent *a)
 {
-	while (a->applied_index < a->commit_index &&
-	       a->applied_index < RAFT_WORKING_LOG_ENTRIES) {
-		apply_event(&a->network, &a->log[a->applied_index].event);
-		a->applied_index++;
+	while (a->applied_index < a->commit_index && a->applied_index < a->last_index) {
+		uint32_t index = a->applied_index + 1;
+		const struct raft_log_entry *e = entry_at(a, index);
+
+		apply_event(&a->network, &e->event);
+		a->applied_hash = raft_hash_entry(a->applied_hash, e);
+		a->applied_index = index;
+		if (a->on_apply) {
+			a->on_apply(a->apply_ctx, index, e, index <= a->replay_boundary, &a->network);
+		}
 	}
+}
+
+/*
+ * Make room in the RAM window for entry `index` by folding the oldest applied
+ * entries into the base snapshot. Only applied (so committed) entries are
+ * ever compacted.
+ */
+static void compact_for(struct raft_agent *a, uint32_t index)
+{
+	while (index - a->log_base > RAFT_LOG_WINDOW && a->log_base < a->applied_index) {
+		uint32_t index = a->log_base + 1;
+		const struct raft_log_entry *e = entry_at(a, index);
+
+		apply_event(&a->base_network, &e->event);
+		a->base_hash = raft_hash_entry(a->base_hash, e);
+		a->base_term = e->term;
+		a->log_base = index;
+	}
+}
+
+/* Room to store entry `index` (compacting if needed)? */
+static bool room_for(struct raft_agent *a, uint32_t index)
+{
+	compact_for(a, index);
+	return index > a->log_base && index - a->log_base <= RAFT_LOG_WINDOW;
 }
 
 static void reply_client(struct raft_agent *a, uint8_t target, uint32_t request_id,
@@ -137,24 +258,57 @@ static void client_result(struct raft_agent *a, uint8_t client, uint32_t request
 	}
 }
 
+/* InstallSnapshot: the follower needs an entry we have compacted away. */
+static void send_snapshot(struct raft_agent *a, uint8_t target)
+{
+	struct raft_append m = {
+		.target = target,
+		.term = a->term,
+		.prev_index = a->log_base,
+		.prev_term = a->base_term,
+		.leader_commit = a->commit_index,
+		.entry_count = RAFT_SNAPSHOT_MARK,
+		.snapshot_network = raft_network_pack(&a->base_network),
+		.snapshot_hash = a->base_hash,
+	};
+	uint8_t body[RAFT_APPEND_SNAPSHOT_LEN];
+	uint8_t len = raft_append_encode(&m, body);
+
+	DBG(a, "append: snapshot through #%u (term %u) -> N%u", (unsigned)a->log_base,
+	    (unsigned)a->base_term, (unsigned)target + 1);
+	send_body(a, ID_APPEND(a->self), body, len);
+}
+
 static void send_append(struct raft_agent *a, uint8_t target, uint32_t index)
 {
-	if (index == 0 || index > a->last_index || index > RAFT_WORKING_LOG_ENTRIES) {
+	if (index == 0 || index > a->last_index) {
 		return;
 	}
+	if (index <= a->log_base) {
+		send_snapshot(a, target);
+		return;
+	}
+	const struct raft_log_entry *e = entry_at(a, index);
 	struct raft_append m = {
 		.target = target,
 		.term = a->term,
 		.prev_index = index - 1,
-		.prev_term = index > 1 ? a->log[index - 2].term : 0,
+		.prev_term = term_at(a, index - 1),
 		.leader_commit = a->commit_index,
 		.entry_count = 1,
-		.entry_term = a->log[index - 1].term,
-		.entry = a->log[index - 1].event,
+		.entry_term = e->term,
+		.entry = e->event,
 	};
 	uint8_t body[RAFT_APPEND_ENTRY_LEN];
 	uint8_t len = raft_append_encode(&m, body);
 
+	if (target == RAFT_TARGET_ALL) {
+		DBG(a, "append: #%u term %u %s -> all", (unsigned)index, (unsigned)e->term,
+		    raft_event_name(e->event.type));
+	} else {
+		DBG(a, "append: #%u term %u %s -> N%u", (unsigned)index, (unsigned)e->term,
+		    raft_event_name(e->event.type), (unsigned)target + 1);
+	}
 	send_body(a, ID_APPEND(a->self), body, len);
 }
 
@@ -164,7 +318,7 @@ static bool send_empty_append(struct raft_agent *a)
 		.target = RAFT_TARGET_ALL,
 		.term = a->term,
 		.prev_index = a->last_index,
-		.prev_term = a->last_index ? a->log[a->last_index - 1].term : 0,
+		.prev_term = term_at(a, a->last_index),
 		.leader_commit = a->commit_index,
 	};
 	uint8_t body[RAFT_APPEND_ENTRY_LEN];
@@ -230,6 +384,13 @@ static void handle_client_update(struct raft_agent *a, uint8_t sender,
 		client_result(a, sender, m->request_id, RAFT_CLIENT_REJECTED, 0);
 		return;
 	}
+	/* An STM32 reports COCKPIT_ERROR when it stops hearing N1. Like NODE_DOWN,
+	 * only accept it if this leader has lost N1 too. */
+	if (m->event.type == RAFT_EVENT_COCKPIT_ERROR && sender != NODE_N1 &&
+	    (a->self == NODE_N1 || !a->obs[1 + NODE_N1].seen || a->obs[1 + NODE_N1].up)) {
+		client_result(a, sender, m->request_id, RAFT_CLIENT_REJECTED, 0);
+		return;
+	}
 	if (a->last_client_id[sender] == m->request_id &&
 	    a->last_client_index[sender] != 0) {
 		client_result(a, sender, m->request_id, RAFT_CLIENT_COMMITTED,
@@ -247,14 +408,18 @@ static void handle_client_update(struct raft_agent *a, uint8_t sender,
 	if (a->pending_index) {
 		return;
 	}
-	/* Log full: REJECTED makes the client wait RAFT_CLIENT_REJECT_BACKOFF_MS. */
-	if (a->last_index >= RAFT_WORKING_LOG_ENTRIES) {
+	/* Log full (log_size reached, or no room in RAM): REJECTED makes the
+	 * client wait RAFT_CLIENT_REJECT_BACKOFF_MS. */
+	if (a->last_index >= RAFT_LOG_CAPACITY || !room_for(a, a->last_index + 1)) {
 		client_result(a, sender, m->request_id, RAFT_CLIENT_REJECTED, 0);
 		return;
 	}
-	a->log[a->last_index].term = a->term;
-	a->log[a->last_index].event = m->event;
+	entry_at(a, a->last_index + 1)->term = a->term;
+	entry_at(a, a->last_index + 1)->event = m->event;
 	a->last_index++;
+	DBG(a, "leader: #%u term %u %s N%u from N%u", (unsigned)a->last_index,
+	    (unsigned)a->term, raft_event_name(m->event.type), (unsigned)m->event.node + 1,
+	    (unsigned)sender + 1);
 	a->pending_index = a->last_index;
 	a->pending_client = sender;
 	a->pending_request_id = m->request_id;
@@ -269,16 +434,36 @@ void raft_agent_init(struct raft_agent *a, uint8_t self, raft_send_fn send, void
 	a->self = self;
 	a->leader = RAFT_DEFAULT_LEADER;
 	a->term = RAFT_DEFAULT_LEADER >= 0 ? 1 : 0;
-	a->role = (int)self == RAFT_DEFAULT_LEADER ? RAFT_LEADER : RAFT_FOLLOWER;
+	a->role = RAFT_FOLLOWER;
 	a->voted_for = RAFT_DEFAULT_LEADER;
 	a->send = send;
 	a->send_ctx = send_ctx;
-	a->election_random_state = random_seed ? random_seed : 0x6d2b79f5u ^ (uint32_t)self;
-	/* With a configured leader, wait for its first REF before treating it as
-	 * failed. Random-leader mode has no leader to wait for at boot. */
-	if (a->role != RAFT_LEADER && RAFT_DEFAULT_LEADER < 0) {
-		reset_election_timer(a, now_ms);
+	a->base_hash = RAFT_HASH_INIT;
+	a->applied_hash = RAFT_HASH_INIT;
+	if (RAFT_ELECTION_SEED != 0) {
+		/* Reproducible: each node's timeouts depend only on the seed. */
+		a->election_random_state = (uint32_t)RAFT_ELECTION_SEED ^
+					   (0x9e3779b9u * ((uint32_t)self + 1u));
+	} else {
+		a->election_random_state = random_seed ? random_seed : 0x6d2b79f5u ^ (uint32_t)self;
 	}
+	if (a->election_random_state == 0) {
+		a->election_random_state = 1; /* xorshift never leaves 0 */
+	}
+	const int default_leader = RAFT_DEFAULT_LEADER; /* -1 in random mode */
+
+	if (default_leader >= 0 && (int)self == default_leader) {
+		/* Listen before taking term 1: a running cluster means we are a
+		 * returning node (the Pi after an STM32 took over), not a fresh boot. */
+		a->leader = -1;
+		a->term = 0;
+		a->voted_for = -1;
+		a->boot_listen = true;
+		a->boot_listen_until_ms = now_ms + RAFT_BOOT_LISTEN_MS;
+	}
+	/* With a configured leader, followers wait for its first REF before treating
+	 * it as failed. In random mode the boot election waits for every node. */
+	a->wait_cluster = RAFT_DEFAULT_LEADER < 0;
 }
 
 bool raft_client_report(struct raft_agent *a, struct raft_event event)
@@ -333,6 +518,38 @@ bool raft_client_observe(struct raft_agent *a, struct raft_event event, uint32_t
 	return true;
 }
 
+void raft_client_forget(struct raft_agent *a, struct raft_event event)
+{
+	bool up;
+	int subject = event_subject(&event, &up);
+
+	if (subject < 0) {
+		return;
+	}
+	a->obs[subject] = (struct raft_observation){0};
+	for (uint8_t i = 0; i < a->queue_count; i++) {
+		uint8_t at = (uint8_t)((a->queue_head + i) % RAFT_CLIENT_QUEUE_LEN);
+		bool q_up;
+
+		if (event_subject(&a->queued[at], &q_up) == subject) {
+			/* Shift the rest of the queue down over it. */
+			for (uint8_t j = i; j + 1 < a->queue_count; j++) {
+				a->queued[(a->queue_head + j) % RAFT_CLIENT_QUEUE_LEN] =
+					a->queued[(a->queue_head + j + 1) % RAFT_CLIENT_QUEUE_LEN];
+			}
+			a->queue_count--;
+			break;
+		}
+	}
+	if (a->active_request) {
+		bool active_up;
+
+		if (event_subject(&a->active_event, &active_up) == subject) {
+			a->active_request = false;
+		}
+	}
+}
+
 /* Queue each observation that has held long enough and differs from the last report. */
 static void client_debounce(struct raft_agent *a, uint32_t now_ms)
 {
@@ -385,7 +602,7 @@ void raft_client_get_network(const struct raft_agent *a, struct raft_network *ou
 static bool candidate_log_current(const struct raft_agent *a, uint32_t last_index,
 				  uint32_t last_term)
 {
-	uint32_t own_last_term = a->last_index ? a->log[a->last_index - 1].term : 0;
+	uint32_t own_last_term = term_at(a, a->last_index);
 
 	return last_term > own_last_term ||
 	       (last_term == own_last_term && last_index >= a->last_index);
@@ -396,12 +613,13 @@ static void start_pre_vote(struct raft_agent *a)
 	struct raft_vote_request m = {
 		.term = a->term + 1,
 		.last_index = a->last_index,
-		.last_term = a->last_index ? a->log[a->last_index - 1].term : 0,
+		.last_term = term_at(a, a->last_index),
 	};
 	uint8_t body[RAFT_VOTE_REQUEST_LEN];
 
 	a->pre_vote_active = true;
 	a->pre_votes = (uint8_t)(1u << a->self);
+	DBG(a, "election: pre-vote for term %u", (unsigned)(a->term + 1));
 	raft_vote_request_encode(&m, body);
 	send_body(a, ID_PRE_VOTE(a->self), body, sizeof(body));
 }
@@ -415,10 +633,11 @@ void raft_agent_start_election(struct raft_agent *a)
 	a->role = RAFT_CANDIDATE;
 	a->voted_for = a->self;
 	a->votes = (uint8_t)(1u << a->self);
+	DBG(a, "election: candidate, term %u, requesting votes", (unsigned)a->term);
 	struct raft_vote_request m = {
 		.term = a->term,
 		.last_index = a->last_index,
-		.last_term = a->last_index ? a->log[a->last_index - 1].term : 0,
+		.last_term = term_at(a, a->last_index),
 	};
 	uint8_t body[RAFT_VOTE_REQUEST_LEN];
 
@@ -446,38 +665,77 @@ static void handle_append(struct raft_agent *a, uint8_t sender,
 		if (m->term > a->term) {
 			a->voted_for = -1;
 		}
+		if (new_leader) {
+			DBG(a, "follower: leader N%u term %u%s", (unsigned)sender + 1,
+			    (unsigned)m->term, a->role == RAFT_LEADER ? " (stepping down)" : "");
+		}
 		a->term = m->term;
 		a->leader = sender;
 		a->role = RAFT_FOLLOWER;
 		a->pre_vote_active = false;
+		a->boot_listen = false;  /* a running cluster: join it */
+		a->wait_cluster = false;
 		if (new_leader) {
 			reset_election_timer(a, now_ms);
 		}
 		ack.term = a->term;
-		if (m->prev_index <= a->last_index &&
-		    (m->prev_index == 0 || a->log[m->prev_index - 1].term == m->prev_term)) {
-			uint32_t index = m->prev_index + 1;
+		uint32_t index = m->prev_index + 1;
 
+		if (m->entry_count == RAFT_SNAPSHOT_MARK) {
+			if (m->prev_index > a->applied_index) {
+				/* InstallSnapshot: everything through prev_index is committed;
+				 * take the leader's state and hash, drop our log. */
+				a->log_base = m->prev_index;
+				a->base_term = m->prev_term;
+				raft_network_unpack(m->snapshot_network, &a->base_network);
+				a->network = a->base_network;
+				a->base_hash = m->snapshot_hash;
+				a->applied_hash = m->snapshot_hash;
+				a->last_index = m->prev_index;
+				a->commit_index = m->prev_index;
+				a->applied_index = m->prev_index;
+				if (a->replay_boundary < m->prev_index) {
+					a->replay_boundary = m->prev_index;
+				}
+				DBG(a, "follower: snapshot through #%u from N%u", (unsigned)m->prev_index,
+				    (unsigned)sender + 1);
+				if (a->on_apply) {
+					a->on_apply(a->apply_ctx, m->prev_index, NULL, true, &a->network);
+				}
+			}
+			ack.success = 1;
+			ack.match_index = m->prev_index;
+		} else if (m->prev_index <= a->last_index &&
+			   prev_matches(a, m->prev_index, m->prev_term)) {
 			if (m->entry_count == 0) {
 				ack.success = 1;
 				ack.match_index = m->prev_index;
-			} else if (index <= RAFT_WORKING_LOG_ENTRIES &&
-				   (index > a->commit_index || index > a->last_index)) {
-				if (index <= a->last_index &&
-				    a->log[index - 1].term != m->entry_term) {
-					a->last_index = index - 1;
+			} else if (index <= a->log_base) {
+				/* Compacted, so committed: it is the leader's entry. */
+				ack.success = 1;
+				ack.match_index = index;
+			} else if (index <= a->last_index && term_at(a, index) == m->entry_term) {
+				ack.success = 1; /* already have it */
+				ack.match_index = index;
+			} else if (index > a->commit_index) {
+				if (index <= a->last_index) {
+					a->last_index = index - 1; /* drop a conflicting suffix */
 				}
-				if (index > a->last_index) {
-					a->log[index - 1].term = m->entry_term;
-					a->log[index - 1].event = m->entry;
+				if (room_for(a, index)) {
+					entry_at(a, index)->term = m->entry_term;
+					entry_at(a, index)->event = m->entry;
 					a->last_index = index;
+					/* Already committed in the cluster before we got it: a
+					 * catch-up replay rather than a live entry. */
+					if (m->leader_commit >= index && a->replay_boundary < index) {
+						a->replay_boundary = index;
+					}
+					ack.success = 1;
+					ack.match_index = index;
+					DBG(a, "follower: #%u term %u %s from N%u", (unsigned)index,
+					    (unsigned)m->entry_term, raft_event_name(m->entry.type),
+					    (unsigned)sender + 1);
 				}
-				ack.success = 1;
-				ack.match_index = index;
-			} else if (index <= a->last_index &&
-				   a->log[index - 1].term == m->entry_term) {
-				ack.success = 1;
-				ack.match_index = index;
 			}
 			if (ack.success && m->leader_commit > a->commit_index &&
 			    ack.match_index > a->commit_index) {
@@ -536,6 +794,8 @@ static void handle_append_ack(struct raft_agent *a, uint8_t sender,
 		return;
 	}
 	a->commit_index = a->pending_index;
+	DBG(a, "leader: commit #%u (majority %02x)", (unsigned)a->commit_index,
+	    (unsigned)a->pending_acks);
 	apply_committed(a);
 	a->last_client_id[a->pending_client] = a->pending_request_id;
 	a->last_client_index[a->pending_client] = a->commit_index;
@@ -555,6 +815,11 @@ void raft_agent_receive(struct raft_agent *a, uint32_t id, const uint8_t *body,
 		return;
 	}
 	if (kind == ID_REF(0) && len == RAFT_REF_LEN) {
+		if (a->boot_listen) {
+			/* Another node leads: wait for its APPEND (which carries the term)
+			 * instead of taking term 1. */
+			a->boot_listen_until_ms = now_ms + RAFT_BOOT_LISTEN_MS;
+		}
 		if (sender == a->leader) {
 			a->last_ref_ms = now_ms;
 			a->pre_vote_active = false;
@@ -580,7 +845,8 @@ void raft_agent_receive(struct raft_agent *a, uint32_t id, const uint8_t *body,
 					a->obs[subject].committed_ms = now_ms;
 				}
 				a->active_request = false;
-			} else if (m.status == RAFT_CLIENT_REDIRECT && m.leader < NUM_NODES) {
+			} else if (m.status == RAFT_CLIENT_REDIRECT && m.leader < NUM_NODES &&
+				   m.leader != a->self) {
 				a->leader = (int8_t)m.leader;
 				a->last_client_send_ms = 0;
 				a->client_retry_ms = RAFT_CLIENT_RETRY_MS;
@@ -652,6 +918,8 @@ void raft_agent_receive(struct raft_agent *a, uint32_t id, const uint8_t *body,
 		reply.candidate = (uint8_t)sender;
 		reply.granted = m.term == a->term && log_current &&
 			(a->voted_for < 0 || a->voted_for == sender);
+		DBG(a, "election: vote for N%u term %u %s", (unsigned)sender + 1, (unsigned)m.term,
+		    reply.granted ? "granted" : "denied");
 		if (reply.granted) {
 			a->voted_for = (int8_t)sender;
 			reset_election_timer(a, now_ms);
@@ -679,6 +947,8 @@ void raft_agent_receive(struct raft_agent *a, uint32_t id, const uint8_t *body,
 				a->leader = a->self;
 				a->election_timer_active = false;
 				memset(a->follower_match, 0, sizeof(a->follower_match));
+				DBG(a, "election: leader for term %u (votes %02x)", (unsigned)a->term,
+				    (unsigned)a->votes);
 			}
 		}
 	}
@@ -686,6 +956,33 @@ void raft_agent_receive(struct raft_agent *a, uint32_t id, const uint8_t *body,
 
 void raft_agent_poll(struct raft_agent *a, uint32_t now_ms)
 {
+	if (a->boot_listen && (int32_t)(now_ms - a->boot_listen_until_ms) >= 0) {
+		/* Nobody else is leading: a fresh cluster, take the configured term 1. */
+		a->boot_listen = false;
+		a->boot_led = true;
+		a->term = 1;
+		a->role = RAFT_LEADER;
+		a->leader = a->self;
+		a->voted_for = a->self;
+		DBG(a, "boot: no cluster heard in %u ms, default leader for term 1",
+		    (unsigned)RAFT_BOOT_LISTEN_MS);
+	}
+	if (a->wait_cluster) {
+		bool all = true;
+
+		for (int n = 0; n < NUM_NODES; n++) {
+			if (n != a->self && !(a->obs[1 + n].seen && a->obs[1 + n].up)) {
+				all = false;
+			}
+		}
+		if (all) {
+			/* Every node is up: start the boot election clocks together. */
+			a->wait_cluster = false;
+			reset_election_timer(a, now_ms);
+			DBG(a, "boot: all nodes heard, election timeout %u ms",
+			    (unsigned)(a->election_deadline_ms - now_ms));
+		}
+	}
 	if (a->election_timer_active && a->role != RAFT_LEADER &&
 	    (int32_t)(now_ms - a->election_deadline_ms) >= 0) {
 		start_pre_vote(a);
@@ -713,7 +1010,7 @@ void raft_agent_poll(struct raft_agent *a, uint32_t now_ms)
 		a->last_client_send_ms = 0;
 		a->client_retry_ms = RAFT_CLIENT_RETRY_MS;
 	}
-	if (a->active_request &&
+	if (a->active_request && !a->boot_listen &&
 	    (a->last_client_send_ms == 0 ||
 	     now_ms - a->last_client_send_ms >= a->client_retry_ms)) {
 		struct raft_client_update m = {

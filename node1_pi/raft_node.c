@@ -42,11 +42,12 @@ static uint32_t start_ms;
  * The cockpit's log display. Every committed entry is printed once as it is
  * applied; entries that arrived already committed (catch-up after an outage)
  * are marked "(replayed)". raft_seen.log (in the working directory) keeps
- * what was shown, so after the Pi restarts and rejoins, entries it displayed
+ * what was shown (COCKPIT_SEEN_FILE overrides the path), so after the Pi restarts and rejoins, entries it displayed
  * before going down are not shown again: the held events appear exactly once,
  * then live events. A fresh cluster (this node takes term 1 at boot) clears it.
  */
-#define SEEN_FILE "raft_seen.log"
+#define SEEN_FILE_DEFAULT "raft_seen.log"
+static const char *seen_path = SEEN_FILE_DEFAULT; /* COCKPIT_SEEN_FILE overrides */
 struct seen_record {
 	uint32_t term;
 	uint8_t event[4];
@@ -88,7 +89,7 @@ static void debug_line(void *ctx, const char *fmt, ...)
 
 static void seen_load(void)
 {
-	FILE *in = fopen(SEEN_FILE, "rb");
+	FILE *in = fopen(seen_path, "rb");
 	struct seen_record r;
 
 	seen.rec = calloc(RAFT_LOG_CAPACITY, sizeof(*seen.rec));
@@ -98,7 +99,7 @@ static void seen_load(void)
 	if (in) {
 		fclose(in);
 	}
-	seen.f = fopen(SEEN_FILE, "ab");
+	seen.f = fopen(seen_path, "ab");
 }
 
 /* Keep only the first n records of the file. */
@@ -107,7 +108,7 @@ static void seen_truncate(uint32_t n)
 	if (seen.f) {
 		fflush(seen.f);
 		if (ftruncate(fileno(seen.f), (off_t)n * (off_t)sizeof(struct seen_record)) != 0) {
-			perror(SEEN_FILE);
+			perror(seen_path);
 		}
 	}
 	seen.n = n;
@@ -255,6 +256,9 @@ int raft_node_init(pi_raft_emit_fn emit)
 	clock_gettime(CLOCK_MONOTONIC, &seed_time);
 	emit_can = emit;
 	start_ms = monotonic_ms();
+	if (getenv("COCKPIT_SEEN_FILE")) {
+		seen_path = getenv("COCKPIT_SEEN_FILE"); /* tests: never the live file */
+	}
 	seen_load();
 	raft_agent_init(&agent, NODE_N1, send_body, NULL, monotonic_ms(),
 			(uint32_t)seed_time.tv_nsec ^ (uint32_t)seed_time.tv_sec);
@@ -262,7 +266,7 @@ int raft_node_init(pi_raft_emit_fn emit)
 	agent.on_apply = on_apply;
 	if (agent.boot_listen) {
 		printf("Raft N1: listening %u ms for a running cluster before taking term 1"
-		       " (%u entries in %s)\n", (unsigned)RAFT_BOOT_LISTEN_MS, seen.n, SEEN_FILE);
+		       " (%u entries in %s)\n", (unsigned)RAFT_BOOT_LISTEN_MS, seen.n, seen_path);
 	} else if (agent.leader < 0) {
 		printf("Raft N1: term %u, leader unknown, role FOLLOWER\n", agent.term);
 	} else {

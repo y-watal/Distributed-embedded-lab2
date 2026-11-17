@@ -58,7 +58,9 @@ int main(void)
 	n.link_up[NODE_N3][0] = false;
 	bits = raft_route_snapshot(&n);
 	assert(raft_route_send_on_bus(bits, NODE_N1, 0, true));
-	assert(!raft_route_send_on_bus(bits, NODE_N1, 1, true));
+	/* N1's own B link: its DEG_B (checked before routing) decides, not the
+	 * graph. With B locally usable, N2 is still there to hear it. */
+	assert(raft_route_send_on_bus(bits, NODE_N1, 1, true));
 	assert(raft_route_send_on_bus(bits, NODE_N1, 1, false));
 	assert(raft_route_relay(bits, NODE_N1, 0));
 	assert(raft_route_relay(bits, NODE_N3, 1));
@@ -88,6 +90,18 @@ int main(void)
 		n.link_known[node][0] = true;
 		n.link_known[node][1] = true;
 	}
+	bits = raft_route_snapshot(&n);
+	assert(raft_route_send_on_bus(bits, NODE_N1, 0, true));
+	assert(raft_route_send_on_bus(bits, NODE_N1, 1, true));
+
+	/* The Pi returns after NODE_DOWN N1 was committed: the graph marks its
+	 * own links down while N2 and N3 are up on both buses. It must still
+	 * send (CTRL, BLINK, Raft ACKs, the CANLINK_UP reports that fix this). */
+	memset(&n, 0, sizeof(n));
+	set_node(&n, NODE_N1, false, false);
+	n.node_up[NODE_N1] = false;
+	set_node(&n, NODE_N2, true, true);
+	set_node(&n, NODE_N3, true, true);
 	bits = raft_route_snapshot(&n);
 	assert(raft_route_send_on_bus(bits, NODE_N1, 0, true));
 	assert(raft_route_send_on_bus(bits, NODE_N1, 1, true));

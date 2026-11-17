@@ -50,8 +50,15 @@ static inline bool raft_route_send_on_bus(uint32_t bits, int self, int bus,
 {
 	/* Never trust a stale graph over the only locally usable bus. */
 	if (!other_usable || !raft_route_has_peer(bits, self, 1 - bus)) return true;
-	return raft_route_link_may_be_up(bits, self, bus) &&
-	       raft_route_has_peer(bits, self, bus);
+	/*
+	 * Our own links are known locally: the caller has already skipped a bus
+	 * we see as degraded. The committed graph can still say they are down,
+	 * e.g. a node returning after NODE_DOWN (which drops its links) was
+	 * committed. Trusting that would silence every routed frame, including
+	 * the CANLINK_UP / NODE_UP reports that repair the graph: the returning
+	 * Pi sent only heartbeats and the system stayed in SYS_ERROR.
+	 */
+	return raft_route_has_peer(bits, self, bus);
 }
 
 static inline bool raft_route_relay(uint32_t bits, int sender, int src_bus)

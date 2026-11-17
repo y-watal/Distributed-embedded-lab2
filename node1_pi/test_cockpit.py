@@ -15,6 +15,7 @@ import socket
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -39,8 +40,12 @@ class Sim:
             mine, theirs = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
             mine.setblocking(False)
             self.bus[b], child[b] = mine, theirs
+        # Lab 5: a private raft_seen.log, so a test run never touches the
+        # live cockpit's display history in node1_pi/.
+        self.seen_dir = tempfile.mkdtemp(prefix="cockpit_test_")
         env = dict(os.environ, COCKPIT_TEST_FD_A=str(child["A"].fileno()),
-                   COCKPIT_TEST_FD_B=str(child["B"].fileno()))
+                   COCKPIT_TEST_FD_B=str(child["B"].fileno()),
+                   COCKPIT_SEEN_FILE=os.path.join(self.seen_dir, "raft_seen.log"))
         self.proc = subprocess.Popen(
             [binary, "--port", str(UDP_PORT), "--bind", "127.0.0.1",
              "--force-host", "127.0.0.1", "--force-port", str(FORCE_PORT)],

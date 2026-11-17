@@ -51,6 +51,21 @@ bus showed afterwards. Wire formats and rules are in
 - **Pending:** blinkers driven from global time, and calibrating
   `TIMESYNC_REF_DELAY_US` against the scope.
 
+### A returning node is no longer silenced by its own NODE_DOWN
+- **Seen:** after the Pi was powered off and came back with the proxy
+  running, hazards stayed at 2 Hz. On the bus the Pi sent only heartbeats:
+  no CTRL, no BLINK, no APPEND_ACK, no CLIENT_UPDATE. N3 was leading; N2 and
+  N3 reported CTRL timeouts and fell back to stale-BLINK hazards.
+- **Why:** while the Pi was down the log committed `NODE_DOWN N1`, which
+  also marks N1's links down. The returning Pi replayed it, and
+  `raft_route_send_on_bus()` refused both buses because the graph said its
+  own links were down. Only heartbeats bypass routing. The reports that
+  would fix the graph (`NODE_UP N1`, `CANLINK_UP N1`) were blocked by the
+  same rule, so it never recovered. A rebooted STM32 would have done the same.
+- **Changed:** a node's own link state comes from its local DEG detection,
+  checked before routing. The graph only decides whether a bus has anyone
+  to hear the frame. New `raft_route_test` case covers this.
+
 ### Isolated node flashes 2 Hz, not failure-mode 4 Hz
 - **Seen:** with both of N2's jumpers pulled, N2 flashed 4 Hz while N3 flashed
   the cockpit's 2 Hz hazards. N2 had lost N1's heartbeat only because N2

@@ -33,10 +33,12 @@
 #define RAFT_BOOT_LISTEN_MS            250
 /*
  * Random-leader mode (RAFT_DEFAULT_LEADER -1): the boot election timer starts
- * once this node has heard every other node, so boot-time differences (the
- * Pi takes ~30 s) don't decide the winner. RAFT_ELECTION_SEED 0 draws a
+ * once this node hears a majority (itself + one peer), so any two nodes elect
+ * a leader without the third. Nodes that come up together start their clocks
+ * together, and then the seed decides. RAFT_ELECTION_SEED 0 draws a
  * hardware-random timeout; any other value makes every node's timeouts
- * reproducible, and RAFT_SEED_PI_WINS gives the cockpit the shortest one.
+ * reproducible. RAFT_SEED_PI_WINS gives the cockpit the shortest one: start
+ * the cockpit first, then reset both STM32s, so all three meet at once.
  */
 #ifndef RAFT_ELECTION_SEED
 #define RAFT_ELECTION_SEED             0

@@ -107,7 +107,7 @@ struct raft_agent {
 	bool boot_listen;              /* default leader, listening before term 1 */
 	bool boot_led;                 /* took default leadership at boot (fresh cluster) */
 	uint32_t boot_listen_until_ms;
-	bool wait_cluster;             /* random mode: no election before every node is heard */
+	bool wait_cluster;             /* random mode: no boot election before a majority is heard */
 	raft_send_fn send;
 	void *send_ctx;
 	raft_debug_fn debug;

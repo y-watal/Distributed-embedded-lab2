@@ -462,7 +462,7 @@ void raft_agent_init(struct raft_agent *a, uint8_t self, raft_send_fn send, void
 		a->boot_listen_until_ms = now_ms + RAFT_BOOT_LISTEN_MS;
 	}
 	/* With a configured leader, followers wait for its first REF before treating
-	 * it as failed. In random mode the boot election waits for every node. */
+	 * it as failed. In random mode the boot election waits for a majority. */
 	a->wait_cluster = RAFT_DEFAULT_LEADER < 0;
 }
 
@@ -968,19 +968,21 @@ void raft_agent_poll(struct raft_agent *a, uint32_t now_ms)
 		    (unsigned)RAFT_BOOT_LISTEN_MS);
 	}
 	if (a->wait_cluster) {
-		bool all = true;
+		int present = 1; /* ourselves */
 
 		for (int n = 0; n < NUM_NODES; n++) {
-			if (n != a->self && !(a->obs[1 + n].seen && a->obs[1 + n].up)) {
-				all = false;
+			if (n != a->self && a->obs[1 + n].seen && a->obs[1 + n].up) {
+				present++;
 			}
 		}
-		if (all) {
-			/* Every node is up: start the boot election clocks together. */
+		if (present >= RAFT_CLUSTER_SIZE / 2 + 1) {
+			/* A majority is up, so an election can succeed: start the boot
+			 * election clock. Nodes that come up together start together,
+			 * so the seed decides; a missing node doesn't block it. */
 			a->wait_cluster = false;
 			reset_election_timer(a, now_ms);
-			DBG(a, "boot: all nodes heard, election timeout %u ms",
-			    (unsigned)(a->election_deadline_ms - now_ms));
+			DBG(a, "boot: %d of %d nodes heard, election timeout %u ms", present,
+			    RAFT_CLUSTER_SIZE, (unsigned)(a->election_deadline_ms - now_ms));
 		}
 	}
 	if (a->election_timer_active && a->role != RAFT_LEADER &&

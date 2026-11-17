@@ -51,6 +51,17 @@ bus showed afterwards. Wire formats and rules are in
 - **Pending:** blinkers driven from global time, and calibrating
   `TIMESYNC_REF_DELAY_US` against the scope.
 
+### Random mode: any majority elects at boot
+- **Was:** the random-mode boot election waited until all three nodes were
+  heard, so two STM32s booted without the Pi never chose a leader.
+- **Now:** the boot election timer starts once a majority is present (self +
+  one peer). A late node joins as a follower. For the seed runs, start the
+  cockpit first, then reset both STM32s, so all three meet at once.
+- **Seeds:** `RAFT_SEED_N2_WINS` 14 and `RAFT_SEED_N3_WINS` 112 join
+  `RAFT_SEED_PI_WINS` 408. `raft_random_test` checks, for each seed: two
+  nodes elect without the Pi, the Pi then joins as a follower, and the seed
+  picks the winner when all three start together.
+
 ### A returning node is no longer silenced by its own NODE_DOWN
 - **Seen:** after the Pi was powered off and came back with the proxy
   running, hazards stayed at 2 Hz. On the bus the Pi sent only heartbeats:

@@ -224,8 +224,11 @@ first `REF`, as before.
 
 **Random leader** (`LEADER=random`; Pi: `make LEADER=random`, STM32:
 `west build ... -- -DLEADER=random`). Every node starts with no leader. The
-boot election timer starts only once the node has heard every other node,
-so the Pi's ~30 s boot doesn't decide the winner. `SEED=<n>` makes each
+boot election timer starts once the node hears a majority (itself and one
+peer), so any two nodes elect a leader without the third. A node that comes
+up later joins the running leader as a follower. Nodes that come up together
+start their clocks together, and then the seed decides: for the seed runs,
+start the cockpit first, then reset both STM32s. `SEED=<n>` makes each
 node's timeouts reproducible. `SEED=14` (`RAFT_SEED_N2_WINS`) makes N2
 win and `SEED=112` makes N3 win: checkoff 8's "an STM32 is leader".
 `SEED=408` (`RAFT_SEED_PI_WINS`) gives the cockpit a 60 ms first timeout

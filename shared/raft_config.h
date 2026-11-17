@@ -44,6 +44,10 @@
 /* With this seed the first boot timeouts are N1 60 ms, N2 95 ms, N3 95 ms
  * (tests/raft_random_test.c checks it). Build with SEED=408 to use it. */
 #define RAFT_SEED_PI_WINS              408u
+/* Checkoff 8 "an STM32 is leader": first timeouts N1 99, N2 64, N3 96 ms. */
+#define RAFT_SEED_N2_WINS              14u
+/* N1 98, N2 97, N3 65 ms. */
+#define RAFT_SEED_N3_WINS              112u
 
 /*
  * Raft client pacing. Lab 3 DEG and peer-lost detection stay fast for local

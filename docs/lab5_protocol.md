@@ -226,9 +226,10 @@ first `REF`, as before.
 `west build ... -- -DLEADER=random`). Every node starts with no leader. The
 boot election timer starts only once the node has heard every other node,
 so the Pi's ~30 s boot doesn't decide the winner. `SEED=<n>` makes each
-node's timeouts reproducible. `SEED=408` (`RAFT_SEED_PI_WINS`) gives the
-cockpit a 60 ms first timeout against 95 ms on both STM32s, so the Pi wins
-(checkoff 8). After that, elections follow missed `REF`s as in default mode.
+node's timeouts reproducible. `SEED=14` (`RAFT_SEED_N2_WINS`) makes N2
+win and `SEED=112` makes N3 win: checkoff 8's "an STM32 is leader".
+`SEED=408` (`RAFT_SEED_PI_WINS`) gives the cockpit a 60 ms first timeout
+against 95 ms on both STM32s, so the Pi wins (checkoff 8's second part). After that, elections follow missed `REF`s as in default mode.
 
 **Log storage.** `log_size` is `RAFT_LOG_CAPACITY` = 30,000 lifetime
 entries; beyond that the leader answers `REJECTED`. Each node keeps the

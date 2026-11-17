@@ -4,7 +4,8 @@ CFLAGS ?= -std=c11 -O1 -g -Wall -Wextra
 CFLAGS += -I../shared
 OUT ?= build
 
-TESTS = raft_agent raft_wire raft_transport raft_route timesync blink_phase raft_random
+TESTS = raft_agent raft_wire raft_transport raft_route timesync blink_phase raft_random \
+	raft_random_n2 raft_random_n3
 
 all: $(addprefix $(OUT)/,$(TESTS))
 	@for t in $(TESTS); do ./$(OUT)/$$t > /dev/null && echo "PASS $$t" || { echo "FAIL $$t"; exit 1; }; done
@@ -21,6 +22,12 @@ $(OUT)/timesync: timesync_test.c ../shared/timesync.c ../shared/*.h | $(OUT)
 # Random-leader mode with the seed that makes the cockpit win.
 $(OUT)/raft_random: raft_random_test.c ../shared/raft_agent.c ../shared/*.h | $(OUT)
 	$(CC) $(CFLAGS) -DRAFT_DEFAULT_LEADER=-1 -DRAFT_ELECTION_SEED=RAFT_SEED_PI_WINS \
+		-o $@ raft_random_test.c ../shared/raft_agent.c
+$(OUT)/raft_random_n2: raft_random_test.c ../shared/raft_agent.c ../shared/*.h | $(OUT)
+	$(CC) $(CFLAGS) -DRAFT_DEFAULT_LEADER=-1 -DRAFT_ELECTION_SEED=RAFT_SEED_N2_WINS \
+		-o $@ raft_random_test.c ../shared/raft_agent.c
+$(OUT)/raft_random_n3: raft_random_test.c ../shared/raft_agent.c ../shared/*.h | $(OUT)
+	$(CC) $(CFLAGS) -DRAFT_DEFAULT_LEADER=-1 -DRAFT_ELECTION_SEED=RAFT_SEED_N3_WINS \
 		-o $@ raft_random_test.c ../shared/raft_agent.c
 $(OUT)/%: %_test.c ../shared/*.h | $(OUT)
 	$(CC) $(CFLAGS) -o $@ $<

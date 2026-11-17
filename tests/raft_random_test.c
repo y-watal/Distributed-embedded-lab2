@@ -93,6 +93,10 @@ int main(void)
 	       leader + 1, (unsigned)s.nodes[leader].term);
 	if (RAFT_ELECTION_SEED == RAFT_SEED_PI_WINS) {
 		assert(leader == NODE_N1 && s.nodes[NODE_N1].term == 1);
+	} else if (RAFT_ELECTION_SEED == RAFT_SEED_N2_WINS) {
+		assert(leader == NODE_N2 && s.nodes[NODE_N2].term == 1);
+	} else if (RAFT_ELECTION_SEED == RAFT_SEED_N3_WINS) {
+		assert(leader == NODE_N3 && s.nodes[NODE_N3].term == 1);
 	}
 	assert(leader >= 0);
 	return 0;

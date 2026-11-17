@@ -51,6 +51,28 @@ bus showed afterwards. Wire formats and rules are in
 - **Pending:** blinkers driven from global time, and calibrating
   `TIMESYNC_REF_DELAY_US` against the scope.
 
+### Pi DEG_A flicker on the hop: a catch-up storm, now paced
+- **Seen:** relay setup with N3 leading. The Pi's DEG_B was on as expected,
+  but DEG_A flickered. Bus A had no error frames and its error counters
+  stayed flat. The Pi's own CTRL was steady (max gap 42.5 ms), but N2's
+  heartbeat arrived 33/s and the relayed HB_N3/REF about 28/s. There were
+  54 silences over 44 ms in 15 s.
+- **Cause:** bus A carried ~2,000 frames/s: N3 sent ~213 one-entry APPENDs/s
+  to the Pi and the Pi rejected each (~1,740 frames/s), all relayed by N2,
+  starving its transmit buffers. The Pi's entries #31-33 were committed
+  but from an older term: a log kept across a reflash of the other nodes,
+  since the log is in RAM. The leader walked back #34 -> #31, the Pi
+  refused at its committed #31 and asked for #34 again. Every empty APPEND
+  started another such walk, and they never stopped.
+- **Fixes (shared/raft_agent.c):**
+  - A follower whose committed entry conflicts with the leader's drops its
+    RAM log and resyncs from #1 or a snapshot (`RAFT follower: committed #n
+    conflicts ... resync`).
+  - The leader keeps one catch-up APPEND outstanding per follower and ignores
+    stale replies, with a 50 ms timeout (`RAFT_CATCHUP_TIMEOUT_MS`).
+- **Test:** `test_committed_conflict_resyncs_without_storm`. The Pi resyncs
+  to N3's 40 entries in under 1 s with 174 messages in total.
+
 ### Random mode: any majority elects at boot
 - **Was:** the random-mode boot election waited until all three nodes were
   heard, so two STM32s booted without the Pi never chose a leader.

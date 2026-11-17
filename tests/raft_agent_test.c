@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "raft_agent.h"
@@ -18,9 +19,13 @@ struct simulation {
 	unsigned head, count;
 };
 
+static unsigned total_sent; /* every message any simulated node sent */
+
 static bool send_message(void *ctx, uint32_t id, const uint8_t *body, uint8_t len)
 {
 	struct simulation *s = ctx;
+
+	total_sent++;
 
 	assert(s->count < MESSAGE_QUEUE_LEN);
 	struct message *m = &s->messages[(s->head + s->count++) % MESSAGE_QUEUE_LEN];
@@ -630,6 +635,59 @@ static void test_isolated_leader_term_changes_once(void)
 	assert(s.nodes[NODE_N1].role == RAFT_FOLLOWER);
 }
 
+
+/* The hop capture: the Pi kept a committed log from before a reflash while
+ * N3 leads a new history. The Pi must resync, and catch-up must not storm. */
+static void test_committed_conflict_resyncs_without_storm(void)
+{
+	static struct simulation s;
+	const uint32_t n_leader = 40, n_old = 33, same = 30;
+
+	memset(&s, 0, sizeof(s));
+	for (int node = 0; node < NUM_NODES; node++) {
+		raft_agent_init(&s.nodes[node], (uint8_t)node, send_message, &s, 0,
+				(uint32_t)(node + 21));
+		boot_as_default_leader(&s.nodes[node]);
+		struct raft_agent *a = &s.nodes[node];
+
+		a->term = 8;
+		a->leader = NODE_N3;
+		a->voted_for = NODE_N3;
+		a->role = node == NODE_N3 ? RAFT_LEADER : RAFT_FOLLOWER;
+		uint32_t n = node == NODE_N1 ? n_old : n_leader;
+
+		a->applied_hash = RAFT_HASH_INIT;
+		for (uint32_t i = 1; i <= n; i++) {
+			struct raft_log_entry *e = &a->log[i - 1];
+
+			/* N1's #31-33 come from the lost cluster: committed, older term. */
+			e->term = node == NODE_N1 && i > same ? 2 : 3;
+			e->event = (struct raft_event){i % 2 ? RAFT_EVENT_CANLINK_UP :
+						       RAFT_EVENT_CANLINK_DOWN, NODE_N2, 0, 0};
+			a->applied_hash = raft_hash_entry(a->applied_hash, e);
+		}
+		a->last_index = a->commit_index = a->applied_index = n;
+		a->election_timer_active = false;
+		s.active[node] = true;
+	}
+	unsigned sent_before = total_sent;
+
+	for (uint32_t t = 1000; t <= 2000; t += 2) {
+		for (int n = 0; n < NUM_NODES; n++) {
+			raft_agent_poll(&s.nodes[n], t);
+		}
+		pump_rounds(&s, t, 2000);
+	}
+	unsigned sent = total_sent - sent_before;
+	assert(s.nodes[NODE_N1].last_index == n_leader);
+	assert(s.nodes[NODE_N1].applied_hash == s.nodes[NODE_N3].applied_hash);
+	assert(s.nodes[NODE_N1].term == 8 && s.nodes[NODE_N3].role == RAFT_LEADER);
+	/* One catch-up chain: ~40 entries x (APPEND + ACK) plus REF and empty
+	 * APPENDs. The storm sent hundreds of messages a second. */
+	printf("resync after committed conflict: %u messages in 1 s\n", sent);
+	assert(sent < 400);
+}
+
 int main(void)
 {
 	test_commit_stops_at_matching_prefix();
@@ -645,6 +703,7 @@ int main(void)
 	test_cockpit_error_needs_lost_n1();
 	test_forget_drops_report();
 	test_isolated_leader_term_changes_once();
+	test_committed_conflict_resyncs_without_storm();
 
 	struct simulation s = {0};
 	struct raft_agent early_follower;

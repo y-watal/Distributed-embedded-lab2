@@ -98,6 +98,8 @@ struct raft_agent {
 	uint32_t pending_request_id;
 	uint8_t pending_acks; /* bit per node */
 	uint32_t follower_match[NUM_NODES]; /* highest index confirmed by each follower */
+	uint32_t catchup_index[NUM_NODES];  /* outstanding catch-up APPEND, 0 = none */
+	uint32_t catchup_ms[NUM_NODES];
 	uint32_t last_append_send_ms;
 	uint32_t last_client_id[NUM_NODES];
 	uint32_t last_client_index[NUM_NODES];

@@ -32,6 +32,13 @@
  */
 #define RAFT_BOOT_LISTEN_MS            250
 /*
+ * Catch-up pacing: the leader keeps one catch-up APPEND outstanding per
+ * follower and ignores replies that don't answer it, so stale replies (e.g.
+ * to empty APPENDs) can't start parallel catch-up chains. After this long
+ * without an answer, the next reply restarts it.
+ */
+#define RAFT_CATCHUP_TIMEOUT_MS        50
+/*
  * Random-leader mode (RAFT_DEFAULT_LEADER -1): the boot election timer starts
  * once this node hears a majority (itself + one peer), so any two nodes elect
  * a leader without the third. Nodes that come up together start their clocks

@@ -258,6 +258,18 @@ static void client_result(struct raft_agent *a, uint8_t client, uint32_t request
 	}
 }
 
+static void send_append(struct raft_agent *a, uint8_t target, uint32_t index);
+
+/* A catch-up APPEND to one follower; remembered so stale replies are ignored. */
+static void send_catchup(struct raft_agent *a, uint8_t target, uint32_t index, uint32_t now_ms)
+{
+	if (target < NUM_NODES) {
+		a->catchup_index[target] = index;
+		a->catchup_ms[target] = now_ms;
+	}
+	send_append(a, target, index);
+}
+
 /* InstallSnapshot: the follower needs an entry we have compacted away. */
 static void send_snapshot(struct raft_agent *a, uint8_t target)
 {
@@ -717,6 +729,28 @@ static void handle_append(struct raft_agent *a, uint8_t sender,
 			} else if (index <= a->last_index && term_at(a, index) == m->entry_term) {
 				ack.success = 1; /* already have it */
 				ack.match_index = index;
+			} else if (index <= a->last_index && index <= a->commit_index) {
+				/*
+				 * The leader's entry conflicts with one we committed. Raft
+				 * never allows that, unless committed history was lost: the
+				 * log is in RAM, so a majority rebooted and built a new
+				 * history while we kept the old one. Ours is from a cluster
+				 * that no longer exists: drop it and resync from #1 (or a
+				 * snapshot) instead of refusing forever.
+				 */
+				DBG(a, "follower: committed #%u conflicts with N%u's log: resync",
+				    (unsigned)index, (unsigned)sender + 1);
+				a->log_base = 0;
+				a->base_term = 0;
+				memset(&a->base_network, 0, sizeof(a->base_network));
+				memset(&a->network, 0, sizeof(a->network));
+				a->base_hash = RAFT_HASH_INIT;
+				a->applied_hash = RAFT_HASH_INIT;
+				a->last_index = 0;
+				a->commit_index = 0;
+				a->applied_index = 0;
+				a->replay_boundary = 0;
+				ack.match_index = 1; /* send everything again */
 			} else if (index > a->commit_index) {
 				if (index <= a->last_index) {
 					a->last_index = index - 1; /* drop a conflicting suffix */
@@ -768,22 +802,37 @@ static void handle_append_ack(struct raft_agent *a, uint8_t sender,
 	if (a->role != RAFT_LEADER || m->target != a->self || m->term != a->term) {
 		return;
 	}
+	/*
+	 * One catch-up APPEND outstanding per follower. A reply answers it if it
+	 * accepts index i or beyond (an entry or a snapshot), or rejects it by
+	 * pointing below i. Anything else is stale, typically the reply to an
+	 * empty APPEND, and starting another chain from it multiplied the traffic
+	 * into a storm (~1,700 frames/s on the hop, starving N2's heartbeats).
+	 */
+	uint32_t outstanding = a->catchup_index[sender];
+	bool timed_out = (uint32_t)(now_ms - a->catchup_ms[sender]) >= RAFT_CATCHUP_TIMEOUT_MS;
+	bool answers = outstanding == 0 || timed_out ||
+		       (m->success ? m->match_index >= outstanding : m->match_index < outstanding);
+
 	if (!m->success) {
-		if (m->match_index > 0 && m->match_index <= a->last_index) {
+		if (answers && m->match_index > 0 && m->match_index <= a->last_index) {
 			/* A restarted follower may have lost progress we recorded earlier. */
 			a->follower_match[sender] = m->match_index - 1;
-			send_append(a, sender, m->match_index);
+			send_catchup(a, sender, m->match_index, now_ms);
 		}
 		return;
 	}
 	if (m->match_index > a->last_index) {
 		return;
 	}
+	if (answers) {
+		a->catchup_index[sender] = 0;
+	}
 	if (m->match_index > a->follower_match[sender]) {
 		a->follower_match[sender] = m->match_index;
-		if (m->match_index < a->last_index) {
+		if (answers && m->match_index < a->last_index) {
 			/* Continue catch-up one entry at a time, including committed entries. */
-			send_append(a, sender, m->match_index + 1);
+			send_catchup(a, sender, m->match_index + 1, now_ms);
 		}
 	}
 	if (a->pending_index == 0 || m->match_index != a->pending_index) {
@@ -947,6 +996,7 @@ void raft_agent_receive(struct raft_agent *a, uint32_t id, const uint8_t *body,
 				a->leader = a->self;
 				a->election_timer_active = false;
 				memset(a->follower_match, 0, sizeof(a->follower_match));
+				memset(a->catchup_index, 0, sizeof(a->catchup_index));
 				DBG(a, "election: leader for term %u (votes %02x)", (unsigned)a->term,
 				    (unsigned)a->votes);
 			}
